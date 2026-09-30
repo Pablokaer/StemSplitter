@@ -30,9 +30,9 @@ The apps are built for you by GitHub Actions (free), because a Windows build has
 2. Open the **Actions** tab → **Build desktop apps** → **Run workflow**.
    *Or* create a release tag (`git tag v1.0.0 && git push --tags`) and the downloads are attached to a GitHub Release automatically.
 3. After about 15–25 minutes, download:
-   * `StemSplitter-Windows-x64.zip`: unzip it and run `StemSplitter\StemSplitter.exe`
+   * `StemSplitter-Windows-x64.zip`: unzip it and run `StemSplitter\StemSplitter.exe`. It uses an NVIDIA GPU when the PC has one and falls back to the CPU otherwise. It is a ~2.5 GB download because it includes CUDA. On a GitHub Release it comes as `StemSplitter-Windows-x64.7z.001`, `.002`, …: download all parts and open the `.001` with [7-Zip](https://www.7-zip.org).
    * `StemSplitter-macOS-AppleSilicon.zip`: unzip it and drag `StemSplitter.app` to Applications
-   * *(optional)* `StemSplitter-Windows-x64-NVIDIA.zip`: tick "NVIDIA" when you run the workflow. It is much faster on NVIDIA GPUs but a ~2.5 GB download, and is only available from the workflow run's Artifacts, not from Releases.
+   * *(optional)* `StemSplitter-Windows-x64-CPU.zip`: tick "CPU-only" when you run the workflow. It is a much smaller download for PCs without an NVIDIA GPU, and is only available from the workflow run's Artifacts.
 
 ### First launch
 
@@ -49,18 +49,18 @@ The apps are built for you by GitHub Actions (free), because a Windows build has
 3. Click **Split stems**.
 
 **Quality**
-* *Maximum*: best separation. This is the default.
-* *High*: about 2× faster at the Demucs step, with slightly more bleed.
+* *Maximum*: best separation (fine-tuned Demucs specialists). This is the default.
+* *Fast*: one general-purpose Demucs model, about 4× faster at the Demucs step, with slightly more bleed.
 
 ### How long does it take? (4-minute song, Maximum quality, rough figures)
 
 | Hardware | Time |
 |---|---|
-| NVIDIA RTX GPU (NVIDIA build) | ~1–2 min |
+| NVIDIA RTX GPU | ~1–2 min |
 | Apple Silicon M1–M4 (uses the Metal GPU automatically) | ~3–6 min |
 | Modern 8-core CPU, no GPU | ~10–20 min |
 
-The app shows which device it is using at the bottom of the window. You can close the window and it asks before stopping a job that is still running.
+The app shows which device it is using at the bottom of the window, and the log lists how long each step took. On CPUs with performance and efficiency cores it can help to set the environment variable `STEMSPLITTER_THREADS` (for example to the number of performance cores) and compare. You can close the window and it asks before stopping a job that is still running.
 
 ## Running from source (developers)
 
@@ -74,7 +74,7 @@ python main.py                     # desktop app
 python main.py --cli song.mp3 -o out_folder     # headless / batch
 ```
 
-Windows + NVIDIA from source: after the install, run
+Windows + NVIDIA from source (the PyPI `torch` wheel for Windows is CPU-only): after the install, run
 `pip install --force-reinstall --no-deps torch==<same version> --index-url https://download.pytorch.org/whl/cu130`.
 
 Build locally: `pip install pyinstaller && pyinstaller --noconfirm StemSplitter.spec`. The output goes to `dist/`.
@@ -98,4 +98,3 @@ StemSplitter.spec           PyInstaller build recipe
 ## Licenses
 
 The app code is yours. The main components are **python-audio-separator** (MIT), **Demucs** (MIT), **PyTorch** (BSD), **PySide6/Qt** (LGPL-3, dynamically linked) and the **MelBand-RoFormer** vocal model by Kimberley Jensen (check its GitHub repository for the model license before any commercial use). The bundled **FFmpeg** binary comes from `imageio-ffmpeg` and is GPL-licensed. That is fine for personal and internal use. If you distribute the app publicly, include the FFmpeg license and a link to its source.
-# StemSplitter
