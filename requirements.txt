@@ -1,0 +1,8 @@
+# Install PyTorch first if you want a specific build (see README), then:
+#   pip install -r requirements.txt
+audio-separator[cpu]==0.47.0
+torch>=2.3
+PySide6==6.11.2
+imageio-ffmpeg==0.6.0
+soundfile>=0.12
+numpy

@@ -1,0 +1,114 @@
+name: Build desktop apps
+
+on:
+  push:
+    tags: ["v*"]          # push a tag like v1.0.0 -> builds + GitHub Release with the downloads
+  workflow_dispatch:      # or run it by hand from the Actions tab
+    inputs:
+      nvidia:
+        description: "Also build a Windows version with NVIDIA CUDA acceleration (~3 GB download)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows-x64
+            os: windows-latest
+            torch_index: https://download.pytorch.org/whl/cpu
+          - name: macOS-AppleSilicon
+            os: macos-latest
+            torch_index: ""          # default macOS wheel already includes Metal (MPS) GPU support
+          - name: Windows-x64-NVIDIA
+            os: windows-latest
+            torch_index: https://download.pytorch.org/whl/cu130
+            optional: true
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+    steps:
+      - name: Skip optional NVIDIA build unless requested
+        id: gate
+        shell: bash
+        run: |
+          if [[ "${{ matrix.optional }}" == "true" && "${{ github.event.inputs.nvidia }}" != "true" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.skip != 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        if: steps.gate.outputs.skip != 'true'
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+          if [[ -n "${{ matrix.torch_index }}" ]]; then
+            # swap in the requested PyTorch build (CPU-only or CUDA), same version
+            TORCH_VER=$(python -c "import torch; print(torch.__version__.split('+')[0])")
+            pip install --force-reinstall --no-deps "torch==${TORCH_VER}" --index-url "${{ matrix.torch_index }}"
+          fi
+          pip uninstall -y torchaudio || true
+          python -c "import torch; print('torch', torch.__version__)"
+
+      - name: Build with PyInstaller
+        if: steps.gate.outputs.skip != 'true'
+        shell: bash
+        run: pyinstaller --noconfirm StemSplitter.spec
+
+      - name: Self-test packaged app (Windows)
+        if: steps.gate.outputs.skip != 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\StemSplitter\StemSplitter.exe" -ArgumentList "--selftest" -Wait -PassThru
+          Get-Content "$env:LOCALAPPDATA\StemSplitter\selftest.txt"
+          if ($p.ExitCode -ne 0) { exit 1 }
+
+      - name: Sign ad-hoc + self-test packaged app (macOS)
+        if: steps.gate.outputs.skip != 'true' && runner.os == 'macOS'
+        shell: bash
+        run: |
+          codesign --force --deep --sign - dist/StemSplitter.app
+          code=0
+          dist/StemSplitter.app/Contents/MacOS/StemSplitter --selftest || code=$?
+          cat "$HOME/Library/Application Support/StemSplitter/selftest.txt"
+          exit $code
+
+      - name: Package (Windows)
+        if: steps.gate.outputs.skip != 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist\StemSplitter -DestinationPath "StemSplitter-${{ matrix.name }}.zip"
+
+      - name: Package (macOS)
+        if: steps.gate.outputs.skip != 'true' && runner.os == 'macOS'
+        shell: bash
+        run: ditto -c -k --sequesterRsrc --keepParent dist/StemSplitter.app "StemSplitter-${{ matrix.name }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          name: StemSplitter-${{ matrix.name }}
+          path: StemSplitter-${{ matrix.name }}.zip
+          compression-level: 0
+          retention-days: 30
+
+      - name: Attach to GitHub Release
+        # the NVIDIA zip is > 2 GB (GitHub's per-file release limit), so it stays a workflow artifact only
+        if: steps.gate.outputs.skip != 'true' && !matrix.optional && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: StemSplitter-${{ matrix.name }}.zip
