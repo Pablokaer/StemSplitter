@@ -46,8 +46,12 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
+    # pkg_resources: setuptools >= 82 no longer ships it, but a leftover empty folder on the build
+    # machine still gets bundled and PyInstaller's pyi_rth_pkgres hook then crashes at startup
+    # ("no attribute 'NullProvider'"). Nothing needs it: audio_separator only tries it as a
+    # guarded fallback after importlib.metadata.
     excludes=["tkinter", "matplotlib", "IPython", "jupyter", "notebook", "PyQt5", "PyQt6",
-              "torchaudio", "tensorboard", "imageio_ffmpeg", "pytest", "triton"],
+              "torchaudio", "tensorboard", "imageio_ffmpeg", "pytest", "triton", "pkg_resources"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)
