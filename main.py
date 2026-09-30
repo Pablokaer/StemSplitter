@@ -19,7 +19,8 @@ def run_cli(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="StemSplitter --cli")
     parser.add_argument("files", nargs="+", type=Path)
     parser.add_argument("-o", "--output", type=Path, default=default_output_dir())
-    parser.add_argument("-q", "--quality", choices=["maximum", "high"], default="maximum")
+    parser.add_argument("-q", "--quality", choices=["maximum", "fast", "high"], default="maximum",
+                        help='"high" is the old name of "fast"')
     parser.add_argument("-b", "--bitrate", type=int, default=320)
     parser.add_argument("--wav", action="store_true", help="write 24-bit WAV instead of MP3")
     parser.add_argument("--instrumental", action="store_true", help="also write an Instrumental (no vocals) file")
@@ -34,6 +35,14 @@ def run_cli(argv: list[str]) -> int:
             print(f"\r[{pct:3d}%] {text:<60}", end="", flush=True)
 
     engine = StemEngine(log=lambda m: print(f"\n  {m}"))
+    import torch
+
+    if torch.cuda.is_available():
+        print(f"Device: NVIDIA GPU ({torch.cuda.get_device_name(0)})")
+    elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        print("Device: Apple Silicon GPU (Metal)")
+    else:
+        print(f"Device: CPU, {torch.get_num_threads()} threads (no GPU found)")
     opts = Options(
         output_dir=args.output,
         bitrate_kbps=args.bitrate,
@@ -71,7 +80,9 @@ def run_selftest() -> int:
         ver = subprocess.run([ffmpeg, "-version"], capture_output=True, text=True, **subprocess_flags())
         Separator(info_only=True, model_file_dir=str(models_dir()), log_level=logging.ERROR)
         engine._install_progress_hooks()
-        report.write_text(f"OK torch={torch.__version__} ffmpeg={ver.stdout.splitlines()[0]}\n")
+        report.write_text(
+            f"OK torch={torch.__version__} cuda={torch.version.cuda} ffmpeg={ver.stdout.splitlines()[0]}\n"
+        )
         return 0
     except Exception:
         import traceback

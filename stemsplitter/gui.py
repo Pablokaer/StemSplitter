@@ -42,8 +42,8 @@ FORMATS = [
     ("WAV · 24-bit (lossless)", "wav", 0),
 ]
 QUALITIES = [
-    ("Maximum (slowest, cleanest)", "maximum"),
-    ("High (about 2× faster)", "high"),
+    ("Maximum (cleanest)", "maximum"),
+    ("Fast (about 2× faster, a little more bleed)", "fast"),
 ]
 
 ACCENT = "#7C5CFF"

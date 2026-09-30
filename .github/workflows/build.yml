@@ -5,8 +5,8 @@ on:
     tags: ["v*"]          # push a tag like v1.0.0 -> builds + GitHub Release with the downloads
   workflow_dispatch:      # or run it by hand from the Actions tab
     inputs:
-      nvidia:
-        description: "Also build a Windows version with NVIDIA CUDA acceleration (~3 GB download)"
+      cpu_only:
+        description: "Also build a small CPU-only Windows version (~0.5 GB, for PCs without an NVIDIA GPU)"
         type: boolean
         default: false
 
@@ -21,22 +21,23 @@ jobs:
         include:
           - name: Windows-x64
             os: windows-latest
-            torch_index: https://download.pytorch.org/whl/cpu
+            # CUDA build: uses the NVIDIA GPU when there is one and falls back to the CPU otherwise
+            torch_index: https://download.pytorch.org/whl/cu130
           - name: macOS-AppleSilicon
             os: macos-latest
             torch_index: ""          # default macOS wheel already includes Metal (MPS) GPU support
-          - name: Windows-x64-NVIDIA
+          - name: Windows-x64-CPU
             os: windows-latest
-            torch_index: https://download.pytorch.org/whl/cu130
+            torch_index: https://download.pytorch.org/whl/cpu
             optional: true
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.name }}
     steps:
-      - name: Skip optional NVIDIA build unless requested
+      - name: Skip optional CPU-only build unless requested
         id: gate
         shell: bash
         run: |
-          if [[ "${{ matrix.optional }}" == "true" && "${{ github.event.inputs.nvidia }}" != "true" ]]; then
+          if [[ "${{ matrix.optional }}" == "true" && "${{ github.event.inputs.cpu_only }}" != "true" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -63,7 +64,7 @@ jobs:
             pip install --force-reinstall --no-deps "torch==${TORCH_VER}" --index-url "${{ matrix.torch_index }}"
           fi
           pip uninstall -y torchaudio || true
-          python -c "import torch; print('torch', torch.__version__)"
+          python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
 
       - name: Build with PyInstaller
         if: steps.gate.outputs.skip != 'true'
@@ -106,9 +107,21 @@ jobs:
           compression-level: 0
           retention-days: 30
 
-      - name: Attach to GitHub Release
-        # the NVIDIA zip is > 2 GB (GitHub's per-file release limit), so it stays a workflow artifact only
-        if: steps.gate.outputs.skip != 'true' && !matrix.optional && startsWith(github.ref, 'refs/tags/')
+      - name: Split large archive for the release (Windows CUDA build)
+        # GitHub Releases reject files over 2 GB and the CUDA build is bigger, so it is
+        # attached as a multi-part 7-Zip archive (.7z.001, .7z.002, ...).
+        if: steps.gate.outputs.skip != 'true' && !matrix.optional && runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: 7z a -t7z -mx=5 -v1900m "release\StemSplitter-${{ matrix.name }}.7z" .\dist\StemSplitter
+
+      - name: Attach to GitHub Release (Windows)
+        if: steps.gate.outputs.skip != 'true' && !matrix.optional && runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/StemSplitter-${{ matrix.name }}.7z.*
+
+      - name: Attach to GitHub Release (macOS)
+        if: steps.gate.outputs.skip != 'true' && !matrix.optional && runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: StemSplitter-${{ matrix.name }}.zip

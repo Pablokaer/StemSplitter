@@ -7,9 +7,14 @@ Pipeline (max quality):
   3. Instrumental -> Demucs v4 "htdemucs_ft" (fine-tuned bag of 4 models) -> drums, bass, other.
      Anything Demucs still labels "vocals" at this point is really melodic content
      (lead synths, whistles, guitar leads...) so it is folded into "other".
+     (All 4 models are needed: taking that "vocals" part from the "other" specialist
+     instead of the vocals specialist leaks hi-hats and cymbals into "other".)
   4. Encode each stem to MP3 (320 kbps by default).
 
 Because every step is subtractive, Vocals + Drums + Bass + Other ~= the original mix.
+
+Inference runs on the NVIDIA (CUDA) or Apple (MPS) GPU whenever one is present and falls
+back to the CPU otherwise. On a GPU the vocal model runs in float16.
 """
 
 from __future__ import annotations
@@ -42,18 +47,31 @@ import soundfile as sf
 from .platform_utils import find_ffmpeg, models_dir, subprocess_flags
 
 VOCAL_MODEL = "vocals_mel_band_roformer.ckpt"
-DEMUCS_MODEL = "htdemucs_ft.yaml"
-DEMUCS_BAG_SIZE = 4  # htdemucs_ft = 4 specialised models
 SAMPLE_RATE = 44100
 
 STEM_ORDER = ["Vocals", "Drums", "Bass", "Other"]
 SUPPORTED_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".aiff", ".aif", ".wma"}
 
-# name -> Demucs "shifts" (random time-shift averaging; more = cleaner but slower)
+
+@dataclass(frozen=True)
+class Preset:
+    demucs_model: str
+    shifts: int  # Demucs random time-shift averaging; every shift is one more full pass
+    passes: int  # Demucs sub-models actually run per shift (for progress reporting)
+
+
 QUALITY_PRESETS = {
-    "maximum": 2,
-    "high": 1,
+    # 4 fine-tuned specialists. A second shift costs a full extra pass for very little gain.
+    "maximum": Preset("htdemucs_ft.yaml", shifts=1, passes=4),
+    # one general-purpose model: about 2x faster at the Demucs step, slightly more bleed
+    "fast": Preset("htdemucs.yaml", shifts=1, passes=1),
 }
+QUALITY_ALIASES = {"high": "fast"}  # name used by older versions (saved settings, scripts)
+
+
+def get_preset(quality: str) -> Preset:
+    return QUALITY_PRESETS.get(QUALITY_ALIASES.get(quality, quality), QUALITY_PRESETS["maximum"])
+
 
 ProgressFn = Callable[[float, str], None]  # (0..1 overall, status text)
 LogFn = Callable[[str], None]
@@ -173,6 +191,24 @@ def _install_progress_hooks() -> None:
     _patched = True
 
 
+def gpu_available() -> bool:
+    import torch
+
+    if torch.cuda.is_available():
+        return True
+    mps = getattr(torch.backends, "mps", None)
+    return bool(mps and mps.is_available())
+
+
+def _apply_thread_override() -> None:
+    """STEMSPLITTER_THREADS=N pins PyTorch's CPU thread count (worth trying on hybrid P/E-core CPUs)."""
+    value = os.environ.get("STEMSPLITTER_THREADS", "").strip()
+    if value.isdigit() and int(value) > 0:
+        import torch
+
+        torch.set_num_threads(int(value))
+
+
 # --------------------------------------------------------------------------------------
 class StemEngine:
     """Keeps models loaded between songs so batch processing is faster."""
@@ -201,7 +237,8 @@ class StemEngine:
         class _Handler(logging.Handler):
             def emit(self, record):
                 msg = record.getMessage()
-                if "Using soundfile" in msg:
+                # the ONNX notice is irrelevant: both models run on PyTorch, which does use the GPU
+                if "Using soundfile" in msg or "ONNXruntime" in msg:
                     return
                 if record.levelno >= logging.WARNING or any(
                     k in msg for k in ("Downloading", "Model downloaded", "hardware acceleration", "Using device")
@@ -214,6 +251,7 @@ class StemEngine:
     def _separator(self, model: str, shifts: int, out_dir: Path):
         """Return a Separator with `model` loaded, writing float WAVs into `out_dir`."""
         _install_progress_hooks()
+        _apply_thread_override()
         from audio_separator.separator import Separator
 
         # find_ffmpeg() already verified ffmpeg; the library's own check would flash a console on Windows.
@@ -230,6 +268,9 @@ class StemEngine:
                 normalization_threshold=1.0,  # only prevents clipping; keeps stems summable
                 sample_rate=SAMPLE_RATE,
                 demucs_params={"segment_size": "Default", "shifts": shifts, "overlap": 0.25, "segments_enabled": True},
+                # float16 RoFormer: much faster on GPU and half the VRAM. The library only
+                # allows it where it is verified (CUDA / MPS RoFormer); Demucs stays float32.
+                use_native_fp16=model == VOCAL_MODEL and gpu_available(),
             )
             logging.getLogger("audio_separator").setLevel(logging.INFO)
             self._attach_logging()
@@ -253,9 +294,10 @@ class StemEngine:
         self, progress: ProgressFn, cancel: Optional[threading.Event] = None, quality: str = "maximum"
     ) -> None:
         """Download (first run only) and load both models."""
-        shifts = QUALITY_PRESETS.get(quality, 2)
+        preset = get_preset(quality)
+        shifts = preset.shifts
         HUB.cancel_event = cancel
-        for i, (model, label) in enumerate([(VOCAL_MODEL, "vocal model"), (DEMUCS_MODEL, "drums/bass model")]):
+        for i, (model, label) in enumerate([(VOCAL_MODEL, "vocal model"), (preset.demucs_model, "drums/bass model")]):
             base = i / 2
 
             def on_bar(bar: _HookTqdm, new: bool, base=base, label=label):
@@ -277,8 +319,17 @@ class StemEngine:
         if not input_path.is_file():
             raise FileNotFoundError(f"File not found: {input_path}")
         HUB.cancel_event = cancel
-        shifts = QUALITY_PRESETS.get(opts.quality, 2)
+        preset = get_preset(opts.quality)
+        shifts = preset.shifts
         song = input_path.stem
+        timings: dict[str, float] = {}
+        mark = time.time()
+
+        def lap(name: str) -> None:
+            nonlocal mark
+            now = time.time()
+            timings[name] = now - mark
+            mark = now
 
         job = Path(tempfile.mkdtemp(prefix="job_", dir=self._work_dir))
         try:
@@ -296,6 +347,7 @@ class StemEngine:
                 ["-i", str(input_path), "-vn", "-ac", "2", "-ar", str(SAMPLE_RATE), "-c:a", "pcm_f32le", str(mix)]
             )
             HUB.check_cancel()
+            lap("decode")
 
             # 2) vocals ----------------------------------------------------------------------
             vocal_dir = job / "vocal_pass"
@@ -314,6 +366,7 @@ class StemEngine:
                 else self._find_stem(vocal_dir, "Instrumental")
             )
             HUB.check_cancel()
+            lap("vocals")
 
             # 3) drums / bass / other ------------------------------------------------------------
             inst_in = job / "inst.wav"
@@ -322,13 +375,14 @@ class StemEngine:
             demucs_dir.mkdir()
             HUB.on_bar = self._bar_tracker(
                 lambda f: stage_progress("demucs", f, f"Separating drums, bass & other... {f:.0%}"),
-                expected_bars=DEMUCS_BAG_SIZE * max(1, shifts),
+                expected_bars=preset.passes * max(1, shifts),
             )
             stage_progress("demucs", 0, "Loading drums/bass model...")
-            sep = self._separator(DEMUCS_MODEL, shifts, demucs_dir)
+            sep = self._separator(preset.demucs_model, shifts, demucs_dir)
             stage_progress("demucs", 0, "Separating drums, bass & other...")
             sep.separate(str(inst_in))
             HUB.on_bar = None
+            lap("demucs")
 
             # 4) assemble + encode ---------------------------------------------------------------
             stage_progress("encode", 0, "Writing files...")
@@ -358,7 +412,9 @@ class StemEngine:
                 result.stems[name] = out
                 stage_progress("encode", (i + 1) / len(stems), f"Writing {name}...")
 
+            lap("encode")
             result.seconds = time.time() - t0
+            self.log(f"{song}: {result.seconds:.0f}s (" + ", ".join(f"{k} {v:.1f}s" for k, v in timings.items()) + ")")
             progress(1.0, "Done")
             return result
         finally:
