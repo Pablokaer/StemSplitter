@@ -98,8 +98,10 @@ def run_selftest() -> int:
         from stemsplitter import worker
 
         ctx = multiprocessing.get_context("spawn")
-        commands, events = ctx.Queue(), ctx.Queue()
-        proc = ctx.Process(target=worker.serve, args=(commands, events, ctx.Event()), daemon=True)
+        # Keep a reference to every queue/event: Process.start() drops its args, and on macOS/Linux a
+        # collected Event unlinks its named semaphore before the child can open it (FileNotFoundError).
+        commands, events, cancel = ctx.Queue(), ctx.Queue(), ctx.Event()
+        proc = ctx.Process(target=worker.serve, args=(commands, events, cancel), daemon=True)
         proc.start()
         commands.put(None)
         proc.join(120)

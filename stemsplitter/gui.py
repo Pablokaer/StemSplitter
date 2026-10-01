@@ -124,7 +124,9 @@ class EngineProcess(QObject):
     def _spawn(self) -> None:
         from .worker import serve
 
-        self._commands, self._events, self._cancel = self._ctx.Queue(), self._ctx.Queue(), self._ctx.Event()
+        # Held on self on purpose: Process.start() drops its args, and on macOS/Linux a collected Event
+        # unlinks its named semaphore before the worker can open it.
+        self._commands, self._events, self._cancel =self._ctx.Queue(), self._ctx.Queue(), self._ctx.Event()
         self._proc = self._ctx.Process(target=serve, args=(self._commands, self._events, self._cancel),
                                        name="StemSplitter worker", daemon=True)
         self._proc.start()
