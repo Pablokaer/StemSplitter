@@ -5,9 +5,15 @@ models once, splits the whole queue and is shut down shortly after the queue is 
 gui.EngineProcess). When a process exits the OS takes back all of its memory, including what
 PyTorch, CUDA and the C libraries keep cached, which `del model; gc.collect()` can't promise.
 
+Commands from the GUI (the `commands` queue):
+  ("prepare", quality)   load PyTorch and the preset's models ahead of time (only models already
+                         downloaded: a first-run download is shown with progress during a run)
+  ("run", jobs, opts)    split [(row, path)]
+  None                   exit
+
 Messages to the GUI are tuples put on the `events` queue:
   ("status", row, fraction, text)   ("done", row, {stem: path}, seconds)   ("failed", row, message)
-  ("log", text)   ("device", text)   ("finished", cancelled)
+  ("log", text)   ("device", text)   ("prepared",)   ("finished", cancelled)
 """
 
 from __future__ import annotations
@@ -85,8 +91,18 @@ def run_jobs(engine, jobs: list[tuple[int, Path]], opts, cancel, emit: Emit) -> 
     return cancelled
 
 
+def _prepare(engine, quality: str, log) -> None:
+    from .engine import get_preset
+    from .platform_utils import models_dir
+
+    models = [m for m, _, _ in engine._models_for(get_preset(quality))]
+    if all((models_dir() / m).is_file() for m in models):
+        engine.prepare_models(lambda frac, text: None, quality=quality)
+        memlog("models preloaded", log)
+
+
 def serve(commands, events, cancel) -> None:
-    """Entry point of the worker process: runs one batch per (jobs, opts) command, until None."""
+    """Entry point of the worker process: runs the GUI's commands (see the module docstring) until None."""
     from .platform_utils import fix_frozen_std_streams
 
     fix_frozen_std_streams()  # windowed builds have no console in this process either
@@ -99,20 +115,33 @@ def serve(commands, events, cancel) -> None:
 
     memlog("worker started", log)
     engine = None
+
+    def get_engine():
+        nonlocal engine
+        if engine is None:
+            from .engine import StemEngine
+
+            engine = StemEngine(log=log)
+            emit("device", describe_device())
+        return engine
+
     while True:
         command = commands.get()
         if command is None:
             break
-        jobs, opts = command
+        if command[0] == "prepare":
+            try:
+                _prepare(get_engine(), command[1], log)
+            except Exception:  # not fatal: the run loads (or downloads) the models again
+                emit("log", traceback.format_exc())
+            emit("prepared")
+            continue
+        _, jobs, opts = command
         cancelled = False
         try:
             if engine is None:
                 emit("status", jobs[0][0], 0.0, "Starting engine (loading PyTorch)...")
-                from .engine import StemEngine
-
-                engine = StemEngine(log=log)
-                emit("device", describe_device())
-            cancelled = run_jobs(engine, jobs, opts, cancel, emit)
+            cancelled = run_jobs(get_engine(), jobs, opts, cancel, emit)
         except Exception as exc:
             emit("log", traceback.format_exc())
             if jobs:

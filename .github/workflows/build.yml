@@ -113,8 +113,23 @@ jobs:
         run: |
           codesign --force --deep --sign - dist/StemSplitter.app
           code=0
-          dist/StemSplitter.app/Contents/MacOS/StemSplitter --selftest || code=$?
-          cat "$HOME/Library/Application Support/StemSplitter/selftest.txt"
+          dist/StemSplitter.app/Contents/MacOS/StemSplitter --selftest > selftest-output.txt 2>&1 || code=$?
+          cat selftest-output.txt
+          data="$HOME/Library/Application Support/StemSplitter"
+          cat "$data/selftest.txt" || true
+          if [[ $code -ne 0 ]]; then
+            # an annotation (unlike the job log) can be read without signing in to GitHub
+            python - "$code" "$data/selftest.txt" selftest-output.txt "$data/stemsplitter.log" <<'PY'
+          import sys
+          from pathlib import Path
+          parts = [f"exit code {sys.argv[1]}"]
+          for p in map(Path, sys.argv[2:]):
+              if p.is_file():
+                  parts.append(f"--- {p.name} ---\n" + p.read_text(errors="replace")[-6000:])
+          msg = "\n".join(parts)
+          print("::error title=macOS self-test failed::" + msg.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
+          PY
+          fi
           exit $code
 
       - name: Package (Windows)

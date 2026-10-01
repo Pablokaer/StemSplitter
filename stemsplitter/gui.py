@@ -63,10 +63,12 @@ class EngineProcess(QObject):
 
     The process lives for a whole batch (models are loaded once) and a short while after it,
     so a song added right away reuses the loaded models; then it exits and its RAM goes back to
-    the OS.
+    the OS. It is also started (prewarm) as soon as songs are added, so PyTorch and the model
+    are usually loaded by the time Split is pressed.
     """
 
     IDLE_SECONDS = 30
+    PREWARM_IDLE_SECONDS = 90  # time to pick the options after adding songs
     POLL_MS = 50
 
     status = Signal(int, float, str)  # row, fraction, text
@@ -89,7 +91,6 @@ class EngineProcess(QObject):
         self._poll.timeout.connect(self._drain)
         self._idle = QTimer(self)
         self._idle.setSingleShot(True)
-        self._idle.setInterval(self.IDLE_SECONDS * 1000)
         self._idle.timeout.connect(self.shutdown)
 
     def run(self, jobs: list[tuple[int, Path]], opts) -> None:
@@ -101,7 +102,19 @@ class EngineProcess(QObject):
         self._cancel.clear()
         self._pending = [row for row, _ in jobs]
         self.busy = True
-        self._commands.put((jobs, opts))
+        self._commands.put(("run", jobs, opts))
+        self._poll.start()
+
+    def prewarm(self, quality: str) -> None:
+        """Start the worker and load the preset's models in the background (no-op while busy)."""
+        if self.busy:
+            return
+        if self._proc is not None and not self._proc.is_alive():
+            self._cleanup()
+        if self._proc is None:
+            self._spawn()
+        self._commands.put(("prepare", quality))
+        self._idle.start(max(self._idle.remainingTime(), self.PREWARM_IDLE_SECONDS * 1000))
         self._poll.start()
 
     def cancel(self) -> None:
@@ -140,6 +153,8 @@ class EngineProcess(QObject):
                 self.log.emit(msg[1])
             elif kind == "device":
                 self.device.emit(msg[1])
+            elif kind == "prepared" and not self.busy:
+                self._poll.stop()
             elif kind == "finished":
                 self._finish(msg[1])
                 return
@@ -159,7 +174,7 @@ class EngineProcess(QObject):
         self._poll.stop()
         self.busy = False
         if self._proc is not None:
-            self._idle.start()
+            self._idle.start(self.IDLE_SECONDS * 1000)
         self.finished.emit(cancelled)
 
     def shutdown(self, timeout: float = 10.0) -> None:
@@ -400,6 +415,8 @@ class MainWindow(QMainWindow):
             self.list.addItem(item)
             existing.add(p)
         self.list.viewport().update()
+        if self.list.count():
+            self.engine.prewarm(self.quality.currentData())
 
     def _pick_files(self):
         start = self.settings.value("last_input_dir", str(Path.home()))

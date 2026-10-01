@@ -286,6 +286,7 @@ class StemEngine:
         Separator.check_ffmpeg_installed = lambda self: None
         sep = self._separators.get(model)
         if sep is None:
+            self._place_on_gpu(None)  # load next to the other models in RAM, not on top of them in VRAM
             sep = Separator(
                 log_level=logging.WARNING,
                 model_file_dir=str(models_dir()),
@@ -310,6 +311,33 @@ class StemEngine:
             sep.model_instance.output_dir = str(out_dir)
             sep.model_instance.overlap = overlap
         return sep
+
+    def _place_on_gpu(self, active: Optional[str]) -> None:
+        """CUDA: keep only the `active` model in VRAM; the others wait in RAM (None: all in RAM).
+
+        Only "maximum" has two models. Both on a 4 GB GPU overflow its memory and Windows then
+        spills into shared system RAM, which made the split several times slower; moving a model
+        between RAM and VRAM takes a fraction of a second. demix() runs on wherever the model is.
+        (Apple GPUs share one memory with the CPU, so there is nothing to gain there.)
+        """
+        if not self._separators:
+            return
+        import torch
+
+        if not torch.cuda.is_available():
+            return
+        freed = False
+        for name, sep in self._separators.items():
+            mi = sep.model_instance
+            net = getattr(mi, "model_run", None)
+            if net is None or getattr(mi.torch_device, "type", None) != "cuda":
+                continue
+            want = mi.torch_device if name == active else torch.device("cpu")
+            if next(net.parameters()).device.type != want.type:
+                net.to(want)
+                freed = freed or want.type == "cpu"
+        if freed:
+            torch.cuda.empty_cache()
 
     def _keep_only(self, preset: Preset) -> None:
         """Unload models the preset doesn't use (e.g. the vocal model after leaving "maximum")."""
@@ -374,6 +402,7 @@ class StemEngine:
         HUB.on_bar = self._bar_tracker(lambda f: report(f, f"{label}... {f:.0%}"), 1, downloading)
         report(0, "Loading model...")
         mi = self._separator(model, overlap, self._work_dir).model_instance
+        self._place_on_gpu(model)
         report(0, f"{label}...")
         # same rule the library applies in separate(): very short clips use the configured segment size
         use_override = getattr(mi, "_use_model_segment_override", lambda seconds: False)
