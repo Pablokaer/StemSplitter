@@ -224,8 +224,9 @@ Tudo medido na RTX 3050:
 
 - **Uma GPU, um trabalho por vez.** Duas inferências simultâneas numa GPU de 4 GB disputam a VRAM, o Windows começa a usar a RAM do sistema e tudo fica **várias vezes mais lento**. Isso foi observado com outra instância do app aberta: até 8× mais lento.
 - **Pipelining limitado:** no máximo uma música esperando gravação, então a RAM nunca guarda mais que duas músicas de stems. Uma música de 5 min com a mistura e 4 stems em float32 ocupa ~0,5 GB; o pico medido do processo foi ~3,1 GiB, incluindo PyTorch e o modelo.
-- **A IA roda num processo separado (worker).** A janela não importa o PyTorch e usa ~50 MB. O worker é criado no *Split stems*, carrega o modelo uma vez para a fila inteira e encerra 30 s depois que a fila termina (`EngineProcess.IDLE_SECONDS`). Só o fim do processo devolve com certeza ao sistema a memória do PyTorch, do CUDA e das bibliotecas C: no mesmo processo, mesmo depois de `engine.close()`, ficavam ~2,1 GB residentes.
+- **A IA roda num processo separado (worker).** A janela não importa o PyTorch e usa ~50 MB. O worker é criado assim que músicas são adicionadas e já carrega o modelo do preset em segundo plano (só se o modelo já tiver sido baixado; espera até 90 s pelo *Split stems*), o que tira ~6 s da espera. Ele carrega o modelo uma vez para a fila inteira e encerra 30 s depois que a fila termina (`EngineProcess.IDLE_SECONDS`). Só o fim do processo devolve com certeza ao sistema a memória do PyTorch, do CUDA e das bibliotecas C: no mesmo processo, mesmo depois de `engine.close()`, ficavam ~2,1 GB residentes.
 - **Uma instância por modelo.** O overlap é só um atributo lido a cada `demix()`, então Balanced e Fast compartilham o mesmo BS-RoFormer. Ao sair do Maximum, o MelBand-RoFormer é descarregado. Antes, alternar entre os presets deixava até 3 instâncias carregadas.
+- **Um modelo por vez na VRAM (CUDA).** No Maximum, o modelo ocioso espera na RAM enquanto o outro roda (`_place_on_gpu`); a troca leva uma fração de segundo. Com os dois na GPU de 4 GB, a reserva de VRAM chegava a 4,3 GB, o Windows passava a usar a RAM do sistema e um trecho de 60 s levava ~860 s. Agora leva ~23 s, com reserva de 1,8 GB e saída bit a bit idêntica. No Apple Silicon a memória é única, então nada muda.
 - **Menos cópias dos arrays:** só os stems usados são copiados da saída do modelo (o "other" do modelo e, sem a opção, guitar e piano são descartados); a média do Maximum, o ganho das músicas altas e o Other são calculados no próprio buffer; o ffmpeg recebe o buffer do stem direto, sem `tobytes()`. A saída continua bit a bit idêntica.
 
 Medido (RTX 3050 Laptop, música de 5:21, Balanced, WAV + Instrumental):
@@ -424,7 +425,7 @@ Para a velocidade, o log já traz o tempo de cada etapa. Para medições finas, 
 
 - **A separação não é perfeita:** reverb pesado, guitarras distorcidas na região da voz e mixagens muito densas sempre deixam algum vazamento.
 - **A CPU é lenta:** ~20–28 min por música de 4 min. A GPU muda tudo.
-- **VRAM de 4 GB:** outros programas usando a GPU, inclusive outra cópia do StemSplitter, podem deixar a separação várias vezes mais lenta. No *Maximum*, os dois modelos ficam na GPU ao mesmo tempo.
+- **VRAM de 4 GB:** outros programas usando a GPU, inclusive outra cópia do StemSplitter, podem deixar a separação várias vezes mais lenta. No *Maximum*, só o modelo em uso fica na GPU.
 - **Primeira passada do modelo de vocais:** em alguns testes, numa sessão nova, ela levou ~45 s a mais que as seguintes. A causa não foi confirmada e não se repetiu em todas as medições.
 - **Apple Silicon:** funciona, mas os tempos ainda não foram medidos.
 - **Apps sem assinatura:** para distribuição pública seriam necessários um Apple Developer ID (com notarização) e um certificado de assinatura no Windows.
