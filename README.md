@@ -1,6 +1,6 @@
 # StemSplitter
 
-> Full technical documentation (in Portuguese): features, quality measurements, performance and optimizations, architecture, build and CI. See [docs/DOCUMENTACAO.md](docs/DOCUMENTACAO.md).
+> Full technical documentation: features, quality measurements, performance and optimizations, architecture, build and CI. See [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md).
 
 A desktop app for **Windows and macOS** that takes a song (MP3, WAV, FLAC, M4A, AAC, OGG, Opus, AIFF, WMA) and splits it into one file per stem:
 
@@ -43,7 +43,7 @@ Measured on the MUSDB18 test set (50 songs with the real stems; median SDR in dB
 
 The apps are built for you by GitHub Actions (free), because a Windows build has to run on Windows and a Mac build on a Mac.
 
-1. Create a new **private** repository on GitHub and upload this folder to it (drag and drop in the web UI works, or `git push`).
+1. The builds run in the GitHub repository (for a copy of your own, create a **private** repository and push this folder to it).
 2. Open the **Actions** tab → **Build desktop apps** → **Run workflow**.
    *Or* create a release tag (`git tag v1.0.0 && git push --tags`) and the downloads are attached to a GitHub Release automatically.
    (Every push is also linted, built and self-tested, so a broken build shows up right away. Downloads are only kept for manual runs and tags.)
@@ -68,7 +68,7 @@ The apps are built for you by GitHub Actions (free), because a Windows build has
 
 **Quality**
 * *Balanced*: the default. Better than the previous version's best setting on every stem, and faster.
-* *Maximum*: adds a second vocal model for the cleanest vocals. About 1.8× slower than Balanced.
+* *Maximum*: adds a second vocal model for the cleanest vocals. About 1.8× slower than Balanced (measured before Maximum started keeping one model at a time in GPU memory; on a 60 s clip it is now about 1.5×).
 * *Fast*: about 1.8× faster than Balanced, with a little more bleed. Still better than the previous version's best setting.
 
 ### How long does it take? (4-minute song)
@@ -80,7 +80,7 @@ Measured on a laptop (Intel i5-12500H, NVIDIA RTX 3050 Laptop 4 GB), scaled from
 | NVIDIA GPU (RTX 3050 Laptop) | ~30 s | ~1 min | ~1 min 45 s |
 | CPU only (12-core laptop CPU) | ~20 min | ~28 min | slower still |
 
-Apple Silicon Macs use the Metal GPU automatically and land in between (not measured yet). Without a GPU, *Fast* is the practical choice.
+The Maximum time was measured before it started keeping one model at a time in GPU memory and should now be lower; it still needs a full-song measurement. Apple Silicon Macs use the Metal GPU automatically and land in between (not measured yet). Without a GPU, *Fast* is the practical choice.
 
 When you add several songs, the next one is already being separated while the previous one is written to disk.
 
@@ -129,7 +129,8 @@ stemsplitter/platform_utils.py  app folders, bundled ffmpeg, Windows/macOS quirk
 StemSplitter.spec               PyInstaller build recipe
 .github/workflows/build.yml     CI: lint, Windows + macOS builds, self-test, releases
 ruff.toml                       lint rules (real errors only)
-docs/DOCUMENTACAO.md            full technical documentation (Portuguese)
+CLAUDE.md                       project rules for Claude Code (English only; document every relevant change)
+docs/DOCUMENTATION.md           full technical documentation
 tools/make_icon.py              generates the icons in assets/
 ```
 
@@ -138,6 +139,7 @@ tools/make_icon.py              generates the icons in assets/
 * **macOS 14 (Sonoma) or newer on Apple Silicon** is required. Intel Macs are not supported, because PyTorch no longer ships Intel-Mac builds.
 * **CPU-only is slow** (about 20–28 minutes for a 4-minute song). A GPU makes it roughly 20× faster.
 * On **4 GB GPUs**, other apps using the GPU at the same time can make a split several times slower (see *Tips for speed*).
+* The *Windows-x64-CPU* CI job only builds on a manual run with the CPU-only option; otherwise it skips its steps and still shows as passed.
 * The apps are unsigned. For public distribution you would need an Apple Developer ID ($99/yr, plus notarization) and a Windows code-signing certificate.
 
 ## Licenses
