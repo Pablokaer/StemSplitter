@@ -42,8 +42,9 @@ FORMATS = [
     ("WAV · 24-bit (lossless)", "wav", 0),
 ]
 QUALITIES = [
-    ("Maximum (cleanest)", "maximum"),
-    ("Fast (about 2× faster, a little more bleed)", "fast"),
+    ("Balanced (recommended)", "balanced"),
+    ("Maximum (cleanest vocals, about 1.8× slower)", "maximum"),
+    ("Fast (about 1.8× faster, a little more bleed)", "fast"),
 ]
 
 ACCENT = "#7C5CFF"
@@ -239,6 +240,8 @@ class MainWindow(QMainWindow):
 
         self.chk_inst = QCheckBox("Also save an Instrumental track (everything except vocals)")
         grid.addWidget(self.chk_inst, 3, 1, 1, 2)
+        self.chk_gp = QCheckBox("Also split Guitar and Piano out of Other (6 stems)")
+        grid.addWidget(self.chk_gp, 4, 1, 1, 2)
         grid.setColumnStretch(1, 1)
         lay.addWidget(card)
 
@@ -291,15 +294,19 @@ class MainWindow(QMainWindow):
     # -- settings -----------------------------------------------------------------------
     def _load_settings(self):
         self.out_edit.setText(self.settings.value("output_dir", str(default_output_dir())))
-        self.quality.setCurrentIndex(int(self.settings.value("quality_idx", 0)))
+        # saved by name (older versions saved an index into a different list, so it is ignored)
+        idx = self.quality.findData(self.settings.value("quality", "balanced"))
+        self.quality.setCurrentIndex(max(0, idx))
         self.fmt.setCurrentIndex(int(self.settings.value("format_idx", 0)))
         self.chk_inst.setChecked(self.settings.value("instrumental", "false") == "true")
+        self.chk_gp.setChecked(self.settings.value("guitar_piano", "false") == "true")
 
     def _save_settings(self):
         self.settings.setValue("output_dir", self.out_edit.text())
-        self.settings.setValue("quality_idx", self.quality.currentIndex())
+        self.settings.setValue("quality", self.quality.currentData())
         self.settings.setValue("format_idx", self.fmt.currentIndex())
         self.settings.setValue("instrumental", "true" if self.chk_inst.isChecked() else "false")
+        self.settings.setValue("guitar_piano", "true" if self.chk_gp.isChecked() else "false")
 
     # -- file list ----------------------------------------------------------------------
     def add_files(self, paths):
@@ -381,6 +388,7 @@ class MainWindow(QMainWindow):
             bitrate_kbps=br or 320,
             quality=self.quality.currentData(),
             also_instrumental=self.chk_inst.isChecked(),
+            guitar_piano=self.chk_gp.isChecked(),
             output_format=fmt,
         )
 
@@ -409,7 +417,8 @@ class MainWindow(QMainWindow):
     def _set_running(self, running: bool):
         self.btn_start.setEnabled(not running)
         self.btn_cancel.setEnabled(running)
-        for w in (self.btn_add, self.btn_remove, self.btn_clear, self.quality, self.fmt, self.chk_inst, self.out_edit):
+        for w in (self.btn_add, self.btn_remove, self.btn_clear, self.quality, self.fmt, self.chk_inst, self.chk_gp,
+                  self.out_edit):
             w.setEnabled(not running)
 
     def _set_item(self, row: int, state: str, icon: str, extra: str = ""):
@@ -475,10 +484,10 @@ class MainWindow(QMainWindow):
             self,
             f"About {APP_NAME}",
             f"<b>{APP_NAME} {__version__}</b><br><br>"
-            "Vocals: MelBand-RoFormer (Kimberley Jensen)<br>"
-            "Drums / Bass / Other: Demucs v4 htdemucs_ft (Meta AI)<br>"
+            "All stems: BS-RoFormer SW (jarredou)<br>"
+            "Maximum quality vocals: + MelBand-RoFormer (Kimberley Jensen)<br>"
             "Powered by python-audio-separator, PyTorch and FFmpeg.<br><br>"
-            "Models are downloaded once on first use (~1.2 GB).",
+            "Models are downloaded once on first use (~0.7 GB, +0.9 GB for Maximum).",
         )
 
     def closeEvent(self, e):

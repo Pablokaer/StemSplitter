@@ -9,16 +9,22 @@ A desktop app for **Windows and macOS** that takes a song (MP3, WAV, FLAC, M4A, 
 | **Bass** | Bass guitar, synth bass, 808s |
 | **Other** | Everything else: the melody and harmony (guitars, keys, synths, strings, …) |
 
-You can also save an **Instrumental** track (everything except the vocals), and you can pick WAV instead of MP3.
+You can also save an **Instrumental** track (everything except the vocals), split **Guitar** and **Piano** out of Other (6 stems), and pick WAV instead of MP3.
 
 ## How it gets such clean stems
 
-It runs two AI models, each one of the best available for its job:
+1. **All stems in one pass.** *BS-RoFormer SW* (jarredou) splits the song into vocals, drums, bass, guitar, piano and other. RoFormer models are the current state of the art in music source separation.
+2. **Vocals, Maximum quality only.** *MelBand-RoFormer* (Kimberley Jensen), one of the best vocal-only models, also isolates the vocals, and the two estimates are averaged. An ensemble of two strong models beats either one alone.
+3. **Other** is whatever is left of the song once the other stems are taken out, so **Vocals + Drums + Bass + Other adds back up to the original song exactly** (before MP3 encoding).
 
-1. **Vocals.** *MelBand-RoFormer* (Kimberley Jensen) separates the vocals from the rest (vocal SDR ≈ 12.6 dB). RoFormer models are currently the best at isolating vocals.
-2. **Drums, bass and other.** *Demucs v4 `htdemucs_ft`* (Meta AI), a set of 4 fine-tuned models, splits the instrumental that step 1 left behind. It works on the vocal-free track, so the other stems end up with much less vocal bleed than a single-pass split gives.
+Measured on the MUSDB18 test set (50 songs with the real stems; median SDR in dB, higher is better):
 
-Every step subtracts from the one before, so **Vocals + Drums + Bass + Other adds back up to the original song** (checked: 28 dB reconstruction SNR after MP3 encoding).
+| | Vocals | Drums | Bass | Other | Average |
+|---|---|---|---|---|---|
+| **Maximum** | 12.03 | 11.38 | 9.58 | 8.04 | 10.26 |
+| **Balanced** | 11.83 | 11.38 | 9.58 | 8.03 | 10.20 |
+| **Fast** | 11.54 | 10.92 | 9.11 | 7.69 | 9.81 |
+| Previous version (MelBand-RoFormer + Demucs `htdemucs_ft`) | 11.30 | 9.77 | 8.76 | 6.72 | 9.14 |
 
 > No tool can separate stems perfectly. Heavy reverb, distorted guitars that overlap the vocal range, and very dense mixes will always leave some bleed. This pipeline is close to the current state of the art.
 
@@ -39,7 +45,7 @@ The apps are built for you by GitHub Actions (free), because a Windows build has
 * **Windows SmartScreen**: the app isn't code-signed, so click **More info → Run anyway**.
 * **macOS Gatekeeper**: right-click the app → **Open** → **Open**. If macOS says the app is "damaged", run this once:
   `xattr -dr com.apple.quarantine /Applications/StemSplitter.app`
-* **Models**: the first split downloads the models once (~1.2 GB). They are stored in
+* **Models**: the first split downloads the models once (~0.7 GB, plus ~0.9 GB the first time you use Maximum). They are stored in
   `%LOCALAPPDATA%\StemSplitter\models` on Windows and `~/Library/Application Support/StemSplitter/models` on macOS.
 
 ## Using it
@@ -49,16 +55,20 @@ The apps are built for you by GitHub Actions (free), because a Windows build has
 3. Click **Split stems**.
 
 **Quality**
-* *Maximum*: best separation (fine-tuned Demucs specialists). This is the default.
-* *Fast*: one general-purpose Demucs model, about 4× faster at the Demucs step, with slightly more bleed.
+* *Balanced*: the default. Better than the previous version's best setting on every stem, and faster.
+* *Maximum*: adds a second vocal model for the cleanest vocals. About 1.8× slower than Balanced.
+* *Fast*: about 1.8× faster than Balanced, with a little more bleed. Still better than the previous version's best setting.
 
-### How long does it take? (4-minute song, Maximum quality, rough figures)
+### How long does it take? (4-minute song)
 
-| Hardware | Time |
-|---|---|
-| NVIDIA RTX GPU | ~1–2 min |
-| Apple Silicon M1–M4 (uses the Metal GPU automatically) | ~3–6 min |
-| Modern 8-core CPU, no GPU | ~10–20 min |
+Measured on a laptop (Intel i5-12500H, NVIDIA RTX 3050 Laptop 4 GB), scaled from a 5:20 song and a 30 s clip:
+
+| Hardware | Fast | Balanced | Maximum |
+|---|---|---|---|
+| NVIDIA GPU (RTX 3050 Laptop) | ~40 s | ~70 s | ~2 min |
+| CPU only (12-core laptop CPU) | ~20 min | ~28 min | slower still |
+
+Apple Silicon Macs use the Metal GPU automatically and land in between (not measured yet). Without a GPU, *Fast* is the practical choice.
 
 The app shows which device it is using at the bottom of the window, and the log lists how long each step took. On CPUs with performance and efficiency cores it can help to set the environment variable `STEMSPLITTER_THREADS` (for example to the number of performance cores) and compare. You can close the window and it asks before stopping a job that is still running.
 
@@ -83,7 +93,7 @@ Build locally: `pip install pyinstaller && pyinstaller --noconfirm StemSplitter.
 
 ```
 main.py                     entry point (GUI, --cli, --selftest)
-stemsplitter/engine.py      separation pipeline (RoFormer → Demucs → MP3)
+stemsplitter/engine.py      separation pipeline (RoFormer models → MP3)
 stemsplitter/gui.py         PySide6 interface
 stemsplitter/platform_utils.py  app folders, bundled ffmpeg, Windows/macOS quirks
 StemSplitter.spec           PyInstaller build recipe
@@ -97,4 +107,4 @@ StemSplitter.spec           PyInstaller build recipe
 
 ## Licenses
 
-The app code is yours. The main components are **python-audio-separator** (MIT), **Demucs** (MIT), **PyTorch** (BSD), **PySide6/Qt** (LGPL-3, dynamically linked) and the **MelBand-RoFormer** vocal model by Kimberley Jensen (check its GitHub repository for the model license before any commercial use). The bundled **FFmpeg** binary comes from `imageio-ffmpeg` and is GPL-licensed. That is fine for personal and internal use. If you distribute the app publicly, include the FFmpeg license and a link to its source.
+The app code is yours. The main components are **python-audio-separator** (MIT), **PyTorch** (BSD), **PySide6/Qt** (LGPL-3, dynamically linked), the **BS-RoFormer SW** model by jarredou and the **MelBand-RoFormer** vocal model by Kimberley Jensen (check each model's repository for its license before any commercial use). The bundled **FFmpeg** binary comes from `imageio-ffmpeg` and is GPL-licensed. That is fine for personal and internal use. If you distribute the app publicly, include the FFmpeg license and a link to its source.

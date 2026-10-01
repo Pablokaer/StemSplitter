@@ -19,11 +19,12 @@ def run_cli(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="StemSplitter --cli")
     parser.add_argument("files", nargs="+", type=Path)
     parser.add_argument("-o", "--output", type=Path, default=default_output_dir())
-    parser.add_argument("-q", "--quality", choices=["maximum", "fast", "high"], default="maximum",
-                        help='"high" is the old name of "fast"')
+    parser.add_argument("-q", "--quality", choices=["balanced", "maximum", "fast", "high"], default="balanced",
+                        help='"high" is the old name of "balanced"')
     parser.add_argument("-b", "--bitrate", type=int, default=320)
     parser.add_argument("--wav", action="store_true", help="write 24-bit WAV instead of MP3")
     parser.add_argument("--instrumental", action="store_true", help="also write an Instrumental (no vocals) file")
+    parser.add_argument("--guitar-piano", action="store_true", help="also split Guitar and Piano out of Other")
     args = parser.parse_args(argv)
 
     last = {"pct": -1}
@@ -48,6 +49,7 @@ def run_cli(argv: list[str]) -> int:
         bitrate_kbps=args.bitrate,
         quality=args.quality,
         also_instrumental=args.instrumental,
+        guitar_piano=args.guitar_piano,
         output_format="wav" if args.wav else "mp3",
     )
     try:

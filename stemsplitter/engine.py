@@ -1,20 +1,24 @@
 """Separation engine.
 
-Pipeline (max quality):
+Pipeline:
   1. Decode the input (MP3, WAV, FLAC, M4A...) to 44.1 kHz stereo float WAV with ffmpeg.
-  2. Vocals: MelBand-RoFormer (Kimberley Jensen) -> vocals + instrumental.
-     RoFormer models are the current state of the art for vocal isolation.
-  3. Instrumental -> Demucs v4 "htdemucs_ft" (fine-tuned bag of 4 models) -> drums, bass, other.
-     Anything Demucs still labels "vocals" at this point is really melodic content
-     (lead synths, whistles, guitar leads...) so it is folded into "other".
-     (All 4 models are needed: taking that "vocals" part from the "other" specialist
-     instead of the vocals specialist leaks hi-hats and cymbals into "other".)
-  4. Encode each stem to MP3 (320 kbps by default).
+  2. BS-RoFormer SW (jarredou) splits the mix in one pass into vocals, drums, bass,
+     guitar, piano and other.
+  3. "maximum" only: MelBand-RoFormer (Kimberley Jensen) also isolates the vocals and the
+     two vocal estimates are averaged (ensembling two strong models beats either one).
+  4. Other = mix - (vocals + drums + bass [+ guitar + piano]), so the stems always add up to
+     the original song exactly. Then each stem is encoded to MP3 (320 kbps by default).
 
-Because every step is subtractive, Vocals + Drums + Bass + Other ~= the original mix.
+Measured on the MUSDB18 test set (50 songs, median SDR in dB, higher is better):
+
+  preset     vocals drums  bass  other   avg   speed vs. the old RoFormer + htdemucs_ft
+  maximum     12.03 11.38  9.58   8.04  10.26  ~0.75x
+  balanced    11.83 11.38  9.58   8.03  10.20  ~1.35x
+  fast        11.54 10.92  9.11   7.69   9.81  ~2.4x
+  (old)       11.30  9.77  8.76   6.72   9.14
 
 Inference runs on the NVIDIA (CUDA) or Apple (MPS) GPU whenever one is present and falls
-back to the CPU otherwise. On a GPU the vocal model runs in float16.
+back to the CPU otherwise. On a GPU both models run in float16.
 """
 
 from __future__ import annotations
@@ -36,7 +40,6 @@ import subprocess
 import tempfile
 import threading
 import time
-import types
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -46,31 +49,34 @@ import soundfile as sf
 
 from .platform_utils import find_ffmpeg, models_dir, subprocess_flags
 
+STEM_MODEL = "BS-Roformer-SW.ckpt"  # 6 stems: bass, drums, other, vocals, guitar, piano
 VOCAL_MODEL = "vocals_mel_band_roformer.ckpt"
 SAMPLE_RATE = 44100
 
 STEM_ORDER = ["Vocals", "Drums", "Bass", "Other"]
+EXTRA_STEMS = ["Guitar", "Piano"]
 SUPPORTED_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".aiff", ".aif", ".wma"}
 
 
 @dataclass(frozen=True)
 class Preset:
-    demucs_model: str
-    shifts: int  # Demucs random time-shift averaging; every shift is one more full pass
-    passes: int  # Demucs sub-models actually run per shift (for progress reporting)
+    # RoFormer "overlap" = number of overlapping prediction windows. Each one is a full pass,
+    # so time grows linearly; 2 is clearly better than 1, 4 adds almost nothing over 2.
+    stem_overlap: int
+    vocal_overlap: int = 0  # 0 = no second vocal model
 
 
 QUALITY_PRESETS = {
-    # 4 fine-tuned specialists. A second shift costs a full extra pass for very little gain.
-    "maximum": Preset("htdemucs_ft.yaml", shifts=1, passes=4),
-    # one general-purpose model: about 2x faster at the Demucs step, slightly more bleed
-    "fast": Preset("htdemucs.yaml", shifts=1, passes=1),
+    "maximum": Preset(stem_overlap=2, vocal_overlap=2),
+    "balanced": Preset(stem_overlap=2),
+    "fast": Preset(stem_overlap=1),
 }
-QUALITY_ALIASES = {"high": "fast"}  # name used by older versions (saved settings, scripts)
+DEFAULT_QUALITY = "balanced"
+QUALITY_ALIASES = {"high": "balanced"}  # name used by older versions (scripts)
 
 
 def get_preset(quality: str) -> Preset:
-    return QUALITY_PRESETS.get(QUALITY_ALIASES.get(quality, quality), QUALITY_PRESETS["maximum"])
+    return QUALITY_PRESETS.get(QUALITY_ALIASES.get(quality, quality), QUALITY_PRESETS[DEFAULT_QUALITY])
 
 
 ProgressFn = Callable[[float, str], None]  # (0..1 overall, status text)
@@ -85,8 +91,9 @@ class Cancelled(Exception):
 class Options:
     output_dir: Path
     bitrate_kbps: int = 320
-    quality: str = "maximum"
+    quality: str = DEFAULT_QUALITY
     also_instrumental: bool = False
+    guitar_piano: bool = False  # also split Guitar and Piano out of Other
     output_format: str = "mp3"  # "mp3" or "wav"
 
 
@@ -181,13 +188,9 @@ def _install_progress_hooks() -> None:
         return
     import audio_separator.separator.separator as sep_mod
     from audio_separator.separator.architectures import mdxc_separator
-    from audio_separator.separator.uvr_lib_v5.demucs import apply as demucs_apply
-    from audio_separator.separator.uvr_lib_v5.demucs import utils as demucs_utils
 
     sep_mod.tqdm = _HookTqdm  # model downloads
     mdxc_separator.tqdm = _HookTqdm  # RoFormer chunks
-    demucs_apply.tqdm = types.SimpleNamespace(tqdm=_HookTqdm)  # Demucs segments
-    demucs_utils.tqdm = types.SimpleNamespace(tqdm=_HookTqdm)
     _patched = True
 
 
@@ -248,7 +251,7 @@ class StemEngine:
         self._log_handler = _Handler(level=logging.INFO)
         logging.getLogger("audio_separator").addHandler(self._log_handler)
 
-    def _separator(self, model: str, shifts: int, out_dir: Path):
+    def _separator(self, model: str, overlap: int, out_dir: Path):
         """Return a Separator with `model` loaded, writing float WAVs into `out_dir`."""
         _install_progress_hooks()
         _apply_thread_override()
@@ -256,7 +259,7 @@ class StemEngine:
 
         # find_ffmpeg() already verified ffmpeg; the library's own check would flash a console on Windows.
         Separator.check_ffmpeg_installed = lambda self: None
-        key = f"{model}|{shifts}"
+        key = f"{model}|{overlap}"
         sep = self._separators.get(key)
         if sep is None:
             sep = Separator(
@@ -267,10 +270,11 @@ class StemEngine:
                 use_soundfile=True,  # keeps 32-bit float (no 16-bit rounding between steps)
                 normalization_threshold=1.0,  # only prevents clipping; keeps stems summable
                 sample_rate=SAMPLE_RATE,
-                demucs_params={"segment_size": "Default", "shifts": shifts, "overlap": 0.25, "segments_enabled": True},
-                # float16 RoFormer: much faster on GPU and half the VRAM. The library only
-                # allows it where it is verified (CUDA / MPS RoFormer); Demucs stays float32.
-                use_native_fp16=model == VOCAL_MODEL and gpu_available(),
+                mdxc_params={"segment_size": 256, "override_model_segment_size": False, "batch_size": 1,
+                             "overlap": overlap, "pitch_shift": 0},
+                # float16 RoFormer: much faster on GPU and half the VRAM; the output differs from
+                # float32 only ~40 dB down. The library only allows it where verified (CUDA / MPS).
+                use_native_fp16=gpu_available(),
             )
             logging.getLogger("audio_separator").setLevel(logging.INFO)
             self._attach_logging()
@@ -282,34 +286,49 @@ class StemEngine:
         return sep
 
     @staticmethod
-    def _find_stem(folder: Path, stem: str) -> Path:
-        pattern = re.compile(rf"_\({re.escape(stem)}\)_", re.IGNORECASE)
-        for p in folder.glob("*.wav"):
-            if pattern.search(p.name):
-                return p
-        raise FileNotFoundError(f"Separator did not produce a '{stem}' stem in {folder}")
+    def _models_for(preset: Preset) -> list[tuple[str, int, str]]:
+        models = [(STEM_MODEL, preset.stem_overlap, "stem model")]
+        if preset.vocal_overlap:
+            models.append((VOCAL_MODEL, preset.vocal_overlap, "vocal model"))
+        return models
 
     # -- public API -----------------------------------------------------------------------
     def prepare_models(
-        self, progress: ProgressFn, cancel: Optional[threading.Event] = None, quality: str = "maximum"
+        self, progress: ProgressFn, cancel: Optional[threading.Event] = None, quality: str = DEFAULT_QUALITY
     ) -> None:
-        """Download (first run only) and load both models."""
-        preset = get_preset(quality)
-        shifts = preset.shifts
+        """Download (first run only) and load the models the preset needs."""
         HUB.cancel_event = cancel
-        for i, (model, label) in enumerate([(VOCAL_MODEL, "vocal model"), (preset.demucs_model, "drums/bass model")]):
-            base = i / 2
+        models = self._models_for(get_preset(quality))
+        for i, (model, overlap, label) in enumerate(models):
+            base, span = i / len(models), 1 / len(models)
 
-            def on_bar(bar: _HookTqdm, new: bool, base=base, label=label):
+            def on_bar(bar: _HookTqdm, new: bool, base=base, span=span, label=label):
                 if bar.total > 1_000_000:  # byte-counted download bar
                     mb = bar.n / 1e6
-                    progress(base + bar.fraction / 2, f"Downloading {label} (first run only): {mb:.0f} MB")
+                    progress(base + bar.fraction * span, f"Downloading {label} (first run only): {mb:.0f} MB")
 
             HUB.on_bar = on_bar
             progress(base, f"Loading {label}...")
-            self._separator(model, shifts, self._work_dir)
+            self._separator(model, overlap, self._work_dir)
         HUB.on_bar = None
         progress(1.0, "Models ready")
+
+    def _run_model(self, model: str, overlap: int, mix: Path, out_dir: Path, label: str, report) -> dict[str, np.ndarray]:
+        """Run one model on `mix`; returns {stem name (lower case): audio}."""
+        out_dir.mkdir()
+        HUB.on_bar = self._bar_tracker(lambda f: report(f, f"{label}... {f:.0%}"), expected_bars=1)
+        report(0, "Loading model (the first run downloads it)...")
+        sep = self._separator(model, overlap, out_dir)
+        report(0, f"{label}...")
+        sep.separate(str(mix))
+        HUB.on_bar = None
+        HUB.check_cancel()
+        stems = {}
+        for p in out_dir.glob("*.wav"):
+            m = re.search(r"_\(([^)]+)\)_", p.name)
+            if m:
+                stems[m.group(1).lower()] = sf.read(p, dtype="float32", always_2d=True)[0]
+        return stems
 
     def separate(
         self, input_path: Path, opts: Options, progress: ProgressFn, cancel: Optional[threading.Event] = None
@@ -320,7 +339,6 @@ class StemEngine:
             raise FileNotFoundError(f"File not found: {input_path}")
         HUB.cancel_event = cancel
         preset = get_preset(opts.quality)
-        shifts = preset.shifts
         song = input_path.stem
         timings: dict[str, float] = {}
         mark = time.time()
@@ -333,74 +351,53 @@ class StemEngine:
 
         job = Path(tempfile.mkdtemp(prefix="job_", dir=self._work_dir))
         try:
-            # Weighted stages -> one smooth overall progress value.
-            stages = {"decode": (0.00, 0.02), "vocals": (0.02, 0.45), "demucs": (0.45, 0.95), "encode": (0.95, 1.0)}
+            # Weighted stages -> one smooth overall progress value (the vocal pass is ~3/4 of the stem pass).
+            if preset.vocal_overlap:
+                stages = {"decode": (0.00, 0.02), "stems": (0.02, 0.55), "vocals": (0.55, 0.95), "encode": (0.95, 1.0)}
+            else:
+                stages = {"decode": (0.00, 0.02), "stems": (0.02, 0.95), "encode": (0.95, 1.0)}
 
-            def stage_progress(name: str, frac: float, text: str):
+            def stage(name: str):
                 a, b = stages[name]
-                progress(a + (b - a) * max(0.0, min(1.0, frac)), text)
+                return lambda frac, text: progress(a + (b - a) * max(0.0, min(1.0, frac)), text)
 
             # 1) decode ----------------------------------------------------------------------
-            stage_progress("decode", 0, "Decoding audio...")
-            mix = job / "mix.wav"
+            stage("decode")(0, "Decoding audio...")
+            mix_wav = job / "mix.wav"
             self._run_ffmpeg(
-                ["-i", str(input_path), "-vn", "-ac", "2", "-ar", str(SAMPLE_RATE), "-c:a", "pcm_f32le", str(mix)]
+                ["-i", str(input_path), "-vn", "-ac", "2", "-ar", str(SAMPLE_RATE), "-c:a", "pcm_f32le", str(mix_wav)]
             )
+            mix, sr = sf.read(mix_wav, dtype="float32", always_2d=True)
             HUB.check_cancel()
             lap("decode")
 
-            # 2) vocals ----------------------------------------------------------------------
-            vocal_dir = job / "vocal_pass"
-            vocal_dir.mkdir()
-            HUB.on_bar = self._bar_tracker(
-                lambda f: stage_progress("vocals", f, f"Isolating vocals... {f:.0%}"), expected_bars=1
-            )
-            stage_progress("vocals", 0, "Loading vocal model...")
-            sep = self._separator(VOCAL_MODEL, shifts, vocal_dir)
-            stage_progress("vocals", 0, "Isolating vocals...")
-            sep.separate(str(mix))
-            vocals_wav = self._find_stem(vocal_dir, "Vocals")
-            inst_wav = (
-                self._find_stem(vocal_dir, "Other")
-                if self._has_stem(vocal_dir, "Other")
-                else self._find_stem(vocal_dir, "Instrumental")
-            )
-            HUB.check_cancel()
-            lap("vocals")
+            # 2) all stems in one pass ------------------------------------------------------------
+            sw = self._run_model(STEM_MODEL, preset.stem_overlap, mix_wav, job / "stems", "Separating stems", stage("stems"))
+            lap("stems")
+            vocals = sw["vocals"]
 
-            # 3) drums / bass / other ------------------------------------------------------------
-            inst_in = job / "inst.wav"
-            shutil.move(str(inst_wav), inst_in)
-            demucs_dir = job / "demucs_pass"
-            demucs_dir.mkdir()
-            HUB.on_bar = self._bar_tracker(
-                lambda f: stage_progress("demucs", f, f"Separating drums, bass & other... {f:.0%}"),
-                expected_bars=preset.passes * max(1, shifts),
-            )
-            stage_progress("demucs", 0, "Loading drums/bass model...")
-            sep = self._separator(preset.demucs_model, shifts, demucs_dir)
-            stage_progress("demucs", 0, "Separating drums, bass & other...")
-            sep.separate(str(inst_in))
-            HUB.on_bar = None
-            lap("demucs")
+            # 3) maximum: average with a second, vocal-only model -----------------------------------
+            if preset.vocal_overlap:
+                kim = self._run_model(
+                    VOCAL_MODEL, preset.vocal_overlap, mix_wav, job / "vocals", "Refining vocals", stage("vocals")
+                )
+                n = min(len(vocals), len(kim["vocals"]))
+                vocals = 0.5 * (vocals[:n] + kim["vocals"][:n])
+                lap("vocals")
 
             # 4) assemble + encode ---------------------------------------------------------------
-            stage_progress("encode", 0, "Writing files...")
-            vocals, sr = sf.read(vocals_wav, dtype="float32", always_2d=True)
-            drums, _ = sf.read(self._find_stem(demucs_dir, "Drums"), dtype="float32", always_2d=True)
-            bass, _ = sf.read(self._find_stem(demucs_dir, "Bass"), dtype="float32", always_2d=True)
-            other, _ = sf.read(self._find_stem(demucs_dir, "Other"), dtype="float32", always_2d=True)
-            residue, _ = sf.read(self._find_stem(demucs_dir, "Vocals"), dtype="float32", always_2d=True)
-            n = min(len(vocals), len(drums), len(bass), len(other), len(residue))
-            stems = {
-                "Vocals": vocals[:n],
-                "Drums": drums[:n],
-                "Bass": bass[:n],
-                "Other": other[:n] + residue[:n],
-            }
+            encode = stage("encode")
+            encode(0, "Writing files...")
+            named = {"Vocals": vocals, "Drums": sw["drums"], "Bass": sw["bass"]}
+            if opts.guitar_piano:
+                named.update(Guitar=sw["guitar"], Piano=sw["piano"])
+            n = min(len(mix), *(len(a) for a in named.values()))
+            stems = {k: a[:n] for k, a in named.items()}
+            # Other = everything not claimed by another stem, so the stems add up to the song exactly.
+            stems["Other"] = mix[:n] - sum(stems.values())
+            stems = {k: stems[k] for k in [*STEM_ORDER, *EXTRA_STEMS] if k in stems}
             if opts.also_instrumental:
-                inst, _ = sf.read(inst_in, dtype="float32", always_2d=True)
-                stems["Instrumental"] = inst[:n]
+                stems["Instrumental"] = mix[:n] - stems["Vocals"]
 
             dest = Path(opts.output_dir) / _safe_name(song)
             dest.mkdir(parents=True, exist_ok=True)
@@ -410,7 +407,7 @@ class StemEngine:
                 out = dest / f"{_safe_name(song)} - {name}.{opts.output_format}"
                 self._write_stem(audio, sr, out, opts, title=f"{song} ({name})")
                 result.stems[name] = out
-                stage_progress("encode", (i + 1) / len(stems), f"Writing {name}...")
+                encode((i + 1) / len(stems), f"Writing {name}...")
 
             lap("encode")
             result.seconds = time.time() - t0
@@ -426,10 +423,6 @@ class StemEngine:
         shutil.rmtree(self._work_dir, ignore_errors=True)
 
     # -- internals ------------------------------------------------------------------------
-    @staticmethod
-    def _has_stem(folder: Path, stem: str) -> bool:
-        return any(f"_({stem.lower()})_" in p.name.lower() for p in folder.glob("*.wav"))
-
     @staticmethod
     def _bar_tracker(report: Callable[[float], None], expected_bars: int):
         """Turn a sequence of tqdm bars into one monotonic 0..1 value."""
