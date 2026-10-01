@@ -424,7 +424,7 @@ class MainWindow(QMainWindow):
         self.chk_inst.setChecked(self.settings.value("instrumental", "false") == "true")
         self.chk_gp.setChecked(self.settings.value("guitar_piano", "false") == "true")
         self.reserve.setCurrentIndex(max(0, self.reserve.findData(int(self.settings.value("memory_reserve_mb", 0)))))
-        self.chk_unlimited.setChecked(self.settings.value("ignore_memory_limit", "false") == "true")
+        self.chk_unlimited.setChecked(self.settings.value("ignore_memory_limit", "true") == "true")  # on by default
         self._on_options_changed()
 
     def _save_settings(self):
