@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import multiprocessing
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -52,13 +53,24 @@ def run_cli(argv: list[str]) -> int:
         guitar_piano=args.guitar_piano,
         output_format="wav" if args.wav else "mp3",
     )
+    def report(future) -> None:
+        res = future.result()
+        print(f"\n  {res.input_path.name}: done in {res.seconds:.0f}s")
+        for name, p in res.stems.items():
+            print(f"  {name:<13} {p}")
+
+    # like the GUI: encode song N on a writer thread while song N+1 is being separated
+    pending = None
     try:
-        for f in args.files:
-            print(f"\n==> {f}")
-            res = engine.separate(f, opts, progress)
-            print(f"\n  done in {res.seconds:.0f}s")
-            for name, p in res.stems.items():
-                print(f"  {name:<13} {p}")
+        with ThreadPoolExecutor(max_workers=1) as writer:
+            for f in args.files:
+                print(f"\n==> {f}")
+                separated = engine.split(f, opts, progress)
+                if pending is not None:
+                    report(pending)
+                pending = writer.submit(engine.write_stems, separated, opts, lambda frac, text: None)
+            if pending is not None:
+                report(pending)
     finally:
         engine.close()
     return 0

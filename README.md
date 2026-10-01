@@ -61,16 +61,24 @@ The apps are built for you by GitHub Actions (free), because a Windows build has
 
 ### How long does it take? (4-minute song)
 
-Measured on a laptop (Intel i5-12500H, NVIDIA RTX 3050 Laptop 4 GB), scaled from a 5:20 song and a 30 s clip:
+Measured on a laptop (Intel i5-12500H, NVIDIA RTX 3050 Laptop 4 GB), scaled from a 5:20 song (Balanced: 77 s) and a 30 s clip:
 
 | Hardware | Fast | Balanced | Maximum |
 |---|---|---|---|
-| NVIDIA GPU (RTX 3050 Laptop) | ~40 s | ~70 s | ~2 min |
+| NVIDIA GPU (RTX 3050 Laptop) | ~30 s | ~1 min | ~1 min 45 s |
 | CPU only (12-core laptop CPU) | ~20 min | ~28 min | slower still |
 
 Apple Silicon Macs use the Metal GPU automatically and land in between (not measured yet). Without a GPU, *Fast* is the practical choice.
 
-The app shows which device it is using at the bottom of the window, and the log lists how long each step took. On CPUs with performance and efficiency cores it can help to set the environment variable `STEMSPLITTER_THREADS` (for example to the number of performance cores) and compare. You can close the window and it asks before stopping a job that is still running.
+When you add several songs, the next one is already being separated while the previous one is written to disk.
+
+**Tips for speed**
+* Almost all of the time is the AI model itself, so the preset is the real speed knob.
+* On GPUs with little memory (4 GB), close other apps that use the GPU (games, video editors, a second copy of StemSplitter). When the GPU runs out of memory Windows borrows system RAM and the split can get several times slower.
+* The app shows which device it is using at the bottom of the window, and the log lists how long each step took.
+* `STEMSPLITTER_THREADS` (environment variable) pins the CPU thread count. On the test laptop the default was already the fastest, so only try it if CPU-only runs look slow.
+
+You can close the window and it asks before stopping a job that is still running.
 
 ## Running from source (developers)
 

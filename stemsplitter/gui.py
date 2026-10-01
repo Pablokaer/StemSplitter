@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal, Slot
@@ -85,25 +86,58 @@ class Worker(QObject):
                 self.device.emit(_describe_device())
             engine = self.holder["engine"]
 
-            for row, path in self.jobs:
-                if self.cancel.is_set():
-                    cancelled = True
-                    break
+            # Song N is encoded on a writer thread while song N+1 is being separated. At most one
+            # song waits to be written, so memory stays bounded to about two songs of stems.
+            with ThreadPoolExecutor(max_workers=1) as writer:
+                pending = None  # (row, future) of the song being written
                 try:
-                    res = engine.separate(path, self.opts, lambda f, t, r=row: self.status.emit(r, f, t), self.cancel)
-                    self.file_done.emit(row, {k: str(v) for k, v in res.stems.items()}, res.seconds)
-                except Cancelled:
-                    cancelled = True
-                    self.file_failed.emit(row, "Cancelled")
-                    break
-                except Exception as exc:  # keep going with the next file
-                    self.log.emit(traceback.format_exc())
-                    self.file_failed.emit(row, str(exc) or exc.__class__.__name__)
+                    for row, path in self.jobs:
+                        if self.cancel.is_set():
+                            cancelled = True
+                            break
+                        progress = lambda f, t, r=row: self.status.emit(r, f, t)  # noqa: E731
+                        try:
+                            separated = engine.split(path, self.opts, progress, self.cancel)
+                        except Cancelled:
+                            cancelled = True
+                            self.file_failed.emit(row, "Cancelled")
+                            break
+                        except Exception as exc:  # keep going with the next file
+                            self.log.emit(traceback.format_exc())
+                            self.file_failed.emit(row, str(exc) or exc.__class__.__name__)
+                            continue
+                        cancelled = self._wait(pending) or cancelled
+                        pending = writer.submit(self._write, engine, row, separated, progress)
+                finally:
+                    cancelled = self._wait(pending) or cancelled
         except Exception as exc:
             self.log.emit(traceback.format_exc())
             if self.jobs:
                 self.file_failed.emit(self.jobs[0][0], f"Engine error: {exc}")
         self.finished.emit(cancelled)
+
+    def _write(self, engine, row: int, separated, progress) -> bool:
+        """Writer thread: save one song and report it as soon as its files are on disk.
+
+        Returns True if it was cancelled.
+        """
+        from .engine import Cancelled
+
+        try:
+            res = engine.write_stems(separated, self.opts, progress, self.cancel)
+            self.file_done.emit(row, {k: str(v) for k, v in res.stems.items()}, res.seconds)
+        except Cancelled:
+            self.file_failed.emit(row, "Cancelled")
+            return True
+        except Exception as exc:
+            self.log.emit(traceback.format_exc())
+            self.file_failed.emit(row, str(exc) or exc.__class__.__name__)
+        return False
+
+    @staticmethod
+    def _wait(future) -> bool:
+        """Block until the previous song is written (bounds memory). Returns True if it was cancelled."""
+        return future.result() if future is not None else False
 
 
 def _describe_device() -> str:

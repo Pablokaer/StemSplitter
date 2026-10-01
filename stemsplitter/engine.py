@@ -1,21 +1,27 @@
 """Separation engine.
 
-Pipeline:
-  1. Decode the input (MP3, WAV, FLAC, M4A...) to 44.1 kHz stereo float WAV with ffmpeg.
+Pipeline (everything stays in memory; no intermediate files):
+  1. ffmpeg decodes the input (MP3, WAV, FLAC, M4A...) to 44.1 kHz stereo float32 via a pipe.
   2. BS-RoFormer SW (jarredou) splits the mix in one pass into vocals, drums, bass,
      guitar, piano and other.
   3. "maximum" only: MelBand-RoFormer (Kimberley Jensen) also isolates the vocals and the
      two vocal estimates are averaged (ensembling two strong models beats either one).
   4. Other = mix - (vocals + drums + bass [+ guitar + piano]), so the stems always add up to
-     the original song exactly. Then each stem is encoded to MP3 (320 kbps by default).
+     the original song exactly. Then all stems are encoded to MP3 (320 kbps by default) in
+     parallel. split() and write_stems() are separate so a batch can encode one song while
+     the next one is on the GPU.
+
+Profiled on an RTX 3050 Laptop, the model forward pass is most of the time and the GPU is
+saturated by it: batching chunks, cudnn.benchmark, TF32 and torch.compile (broken on
+Windows) gave no speed-up, so the remaining knob is the preset's overlap.
 
 Measured on the MUSDB18 test set (50 songs, median SDR in dB, higher is better):
 
-  preset     vocals drums  bass  other   avg   speed vs. the old RoFormer + htdemucs_ft
-  maximum     12.03 11.38  9.58   8.04  10.26  ~0.75x
-  balanced    11.83 11.38  9.58   8.03  10.20  ~1.35x
-  fast        11.54 10.92  9.11   7.69   9.81  ~2.4x
-  (old)       11.30  9.77  8.76   6.72   9.14
+  preset     vocals drums  bass  other   avg     (timings: see README)
+  maximum     12.03 11.38  9.58   8.04  10.26
+  balanced    11.83 11.38  9.58   8.03  10.20
+  fast        11.54 10.92  9.11   7.69   9.81
+  (old)       11.30  9.77  8.76   6.72   9.14   MelBand-RoFormer + htdemucs_ft
 
 Inference runs on the NVIDIA (CUDA) or Apple (MPS) GPU whenever one is present and falls
 back to the CPU otherwise. On a GPU both models run in float16.
@@ -40,6 +46,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -102,6 +109,17 @@ class Result:
     input_path: Path
     stems: dict[str, Path] = field(default_factory=dict)
     seconds: float = 0.0
+
+
+@dataclass
+class Separated:
+    """The stems of one song, still in memory (samples x channels float32), ready to write."""
+
+    input_path: Path
+    stems: dict[str, np.ndarray]
+    sr: int
+    timings: dict[str, float]
+    started: float
 
 
 # --------------------------------------------------------------------------------------
@@ -225,12 +243,14 @@ class StemEngine:
         self._log_handler: Optional[logging.Handler] = None
 
     # -- helpers ------------------------------------------------------------------------
-    def _run_ffmpeg(self, args: list[str], stdin: Optional[bytes] = None) -> None:
+    def _run_ffmpeg(self, args: list[str], stdin: Optional[bytes] = None) -> bytes:
+        """Run ffmpeg; returns its stdout (the decoded audio when the output is "-")."""
         cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *args]
         proc = subprocess.run(cmd, input=stdin, capture_output=True, **subprocess_flags())
         if proc.returncode != 0:
             err = proc.stderr.decode(errors="replace").strip().splitlines()
             raise RuntimeError(f"Could not read/write audio (ffmpeg): {err[-1] if err else 'unknown error'}")
+        return proc.stdout
 
     def _attach_logging(self) -> None:
         if self._log_handler is not None:
@@ -313,33 +333,48 @@ class StemEngine:
         HUB.on_bar = None
         progress(1.0, "Models ready")
 
-    def _run_model(self, model: str, overlap: int, mix: Path, out_dir: Path, label: str, report) -> dict[str, np.ndarray]:
-        """Run one model on `mix`; returns {stem name (lower case): audio}."""
-        out_dir.mkdir()
-        HUB.on_bar = self._bar_tracker(lambda f: report(f, f"{label}... {f:.0%}"), expected_bars=1)
-        report(0, "Loading model (the first run downloads it)...")
-        sep = self._separator(model, overlap, out_dir)
+    def _run_model(self, model: str, overlap: int, mix: np.ndarray, label: str, report) -> dict[str, np.ndarray]:
+        """Run one model on `mix` (samples x channels, peak <= 1) in memory.
+
+        Returns {stem name (lower case): samples x channels}. Calling the model's demix()
+        directly skips the library's WAV round trip (write the mix, read it back with librosa,
+        write every stem, read them back): ~5 s and ~0.8 GB of disk traffic per song.
+        """
+
+        def downloading(frac: float, mb: float) -> None:
+            report(0, f"Downloading model (first run only): {mb:.0f} MB ({frac:.0%})")
+
+        HUB.on_bar = self._bar_tracker(lambda f: report(f, f"{label}... {f:.0%}"), 1, downloading)
+        report(0, "Loading model...")
+        mi = self._separator(model, overlap, self._work_dir).model_instance
         report(0, f"{label}...")
-        sep.separate(str(mix))
+        # same rule the library applies in separate(): very short clips use the configured segment size
+        use_override = getattr(mi, "_use_model_segment_override", lambda seconds: False)
+        out = mi.demix(np.ascontiguousarray(mix.T), override_model_segment_size=use_override(len(mix) / SAMPLE_RATE))
         HUB.on_bar = None
         HUB.check_cancel()
-        stems = {}
-        for p in out_dir.glob("*.wav"):
-            m = re.search(r"_\(([^)]+)\)_", p.name)
-            if m:
-                stems[m.group(1).lower()] = sf.read(p, dtype="float32", always_2d=True)[0]
-        return stems
+        if isinstance(out, np.ndarray):  # single-target model without a residual
+            out = {"vocals": out}
+        return {k.lower(): np.ascontiguousarray(v.T, dtype=np.float32) for k, v in out.items()}
 
-    def separate(
+    def _decode(self, input_path: Path) -> np.ndarray:
+        """Decode any input to 44.1 kHz stereo float32 (samples x 2), piped straight into memory."""
+        raw = self._run_ffmpeg(["-i", str(input_path), "-vn", "-ac", "2", "-ar", str(SAMPLE_RATE), "-f", "f32le", "-"])
+        mix = np.frombuffer(raw, dtype=np.float32).reshape(-1, 2)
+        if not len(mix):
+            raise RuntimeError(f"No audio found in {input_path.name}")
+        return mix
+
+    def split(
         self, input_path: Path, opts: Options, progress: ProgressFn, cancel: Optional[threading.Event] = None
-    ) -> Result:
+    ) -> Separated:
+        """Decode and separate one song; the stems stay in memory (see write_stems)."""
         t0 = time.time()
         input_path = Path(input_path)
         if not input_path.is_file():
             raise FileNotFoundError(f"File not found: {input_path}")
         HUB.cancel_event = cancel
         preset = get_preset(opts.quality)
-        song = input_path.stem
         timings: dict[str, float] = {}
         mark = time.time()
 
@@ -349,13 +384,12 @@ class StemEngine:
             timings[name] = now - mark
             mark = now
 
-        job = Path(tempfile.mkdtemp(prefix="job_", dir=self._work_dir))
         try:
             # Weighted stages -> one smooth overall progress value (the vocal pass is ~3/4 of the stem pass).
             if preset.vocal_overlap:
-                stages = {"decode": (0.00, 0.02), "stems": (0.02, 0.55), "vocals": (0.55, 0.95), "encode": (0.95, 1.0)}
+                stages = {"decode": (0.00, 0.02), "stems": (0.02, 0.55), "vocals": (0.55, 0.95)}
             else:
-                stages = {"decode": (0.00, 0.02), "stems": (0.02, 0.95), "encode": (0.95, 1.0)}
+                stages = {"decode": (0.00, 0.02), "stems": (0.02, 0.95)}
 
             def stage(name: str):
                 a, b = stages[name]
@@ -363,60 +397,77 @@ class StemEngine:
 
             # 1) decode ----------------------------------------------------------------------
             stage("decode")(0, "Decoding audio...")
-            mix_wav = job / "mix.wav"
-            self._run_ffmpeg(
-                ["-i", str(input_path), "-vn", "-ac", "2", "-ar", str(SAMPLE_RATE), "-c:a", "pcm_f32le", str(mix_wav)]
-            )
-            mix, sr = sf.read(mix_wav, dtype="float32", always_2d=True)
+            mix = self._decode(input_path)
             HUB.check_cancel()
+            # Loud masters decode with peaks above 1.0. The models want a peak <= 1, so scale the
+            # input down and the stems back up: "Other = mix - the rest" then stays exact. (Letting
+            # the library normalize on its own left part of every other stem inside "Other".)
+            peak = float(np.max(np.abs(mix)))
+            gain = 1.0 / peak if peak > 1.0 else 1.0
+            model_in = mix * gain if gain != 1.0 else mix
             lap("decode")
 
             # 2) all stems in one pass ------------------------------------------------------------
-            sw = self._run_model(STEM_MODEL, preset.stem_overlap, mix_wav, job / "stems", "Separating stems", stage("stems"))
+            sw = self._run_model(STEM_MODEL, preset.stem_overlap, model_in, "Separating stems", stage("stems"))
             lap("stems")
             vocals = sw["vocals"]
 
             # 3) maximum: average with a second, vocal-only model -----------------------------------
             if preset.vocal_overlap:
-                kim = self._run_model(
-                    VOCAL_MODEL, preset.vocal_overlap, mix_wav, job / "vocals", "Refining vocals", stage("vocals")
-                )
+                kim = self._run_model(VOCAL_MODEL, preset.vocal_overlap, model_in, "Refining vocals", stage("vocals"))
                 n = min(len(vocals), len(kim["vocals"]))
                 vocals = 0.5 * (vocals[:n] + kim["vocals"][:n])
                 lap("vocals")
+            del model_in
 
-            # 4) assemble + encode ---------------------------------------------------------------
-            encode = stage("encode")
-            encode(0, "Writing files...")
+            # 4) assemble ---------------------------------------------------------------------------
             named = {"Vocals": vocals, "Drums": sw["drums"], "Bass": sw["bass"]}
             if opts.guitar_piano:
                 named.update(Guitar=sw["guitar"], Piano=sw["piano"])
             n = min(len(mix), *(len(a) for a in named.values()))
-            stems = {k: a[:n] for k, a in named.items()}
+            stems = {k: a[:n] / gain if gain != 1.0 else a[:n] for k, a in named.items()}
             # Other = everything not claimed by another stem, so the stems add up to the song exactly.
             stems["Other"] = mix[:n] - sum(stems.values())
             stems = {k: stems[k] for k in [*STEM_ORDER, *EXTRA_STEMS] if k in stems}
             if opts.also_instrumental:
                 stems["Instrumental"] = mix[:n] - stems["Vocals"]
-
-            dest = Path(opts.output_dir) / _safe_name(song)
-            dest.mkdir(parents=True, exist_ok=True)
-            result = Result(input_path=input_path)
-            for i, (name, audio) in enumerate(stems.items()):
-                HUB.check_cancel()
-                out = dest / f"{_safe_name(song)} - {name}.{opts.output_format}"
-                self._write_stem(audio, sr, out, opts, title=f"{song} ({name})")
-                result.stems[name] = out
-                encode((i + 1) / len(stems), f"Writing {name}...")
-
-            lap("encode")
-            result.seconds = time.time() - t0
-            self.log(f"{song}: {result.seconds:.0f}s (" + ", ".join(f"{k} {v:.1f}s" for k, v in timings.items()) + ")")
-            progress(1.0, "Done")
-            return result
+            return Separated(input_path, stems, SAMPLE_RATE, timings, t0)
         finally:
             HUB.on_bar = None
-            shutil.rmtree(job, ignore_errors=True)
+
+    def write_stems(
+        self, sep: Separated, opts: Options, progress: ProgressFn, cancel: Optional[threading.Event] = None
+    ) -> Result:
+        """Encode and save the stems of one song, all in parallel (LAME is single-threaded).
+
+        Safe to run on another thread while the next song is being separated.
+        """
+        t = time.time()
+        song = sep.input_path.stem
+        dest = Path(opts.output_dir) / _safe_name(song)
+        dest.mkdir(parents=True, exist_ok=True)
+        jobs = {name: dest / f"{_safe_name(song)} - {name}.{opts.output_format}" for name in sep.stems}
+        progress(0.95, "Writing files...")
+        with ThreadPoolExecutor(max_workers=min(len(jobs), os.cpu_count() or 1)) as pool:
+            futures = {}
+            for name, out in jobs.items():
+                if cancel is not None and cancel.is_set():
+                    raise Cancelled()
+                futures[pool.submit(self._write_stem, sep.stems[name], sep.sr, out, opts, f"{song} ({name})")] = name
+            for i, fut in enumerate(as_completed(futures)):
+                fut.result()
+                progress(0.95 + 0.05 * (i + 1) / len(futures), f"Writing files... {i + 1}/{len(futures)}")
+        timings = {**sep.timings, "encode": time.time() - t}
+        result = Result(input_path=sep.input_path, stems=jobs, seconds=time.time() - sep.started)
+        self.log(f"{song}: {result.seconds:.0f}s (" + ", ".join(f"{k} {v:.1f}s" for k, v in timings.items()) + ")")
+        progress(1.0, "Done")
+        return result
+
+    def separate(
+        self, input_path: Path, opts: Options, progress: ProgressFn, cancel: Optional[threading.Event] = None
+    ) -> Result:
+        """split() + write_stems() for one song."""
+        return self.write_stems(self.split(input_path, opts, progress, cancel), opts, progress, cancel)
 
     def close(self) -> None:
         self._separators.clear()
@@ -424,12 +475,16 @@ class StemEngine:
 
     # -- internals ------------------------------------------------------------------------
     @staticmethod
-    def _bar_tracker(report: Callable[[float], None], expected_bars: int):
+    def _bar_tracker(
+        report: Callable[[float], None], expected_bars: int, on_download: Optional[Callable[[float, float], None]] = None
+    ):
         """Turn a sequence of tqdm bars into one monotonic 0..1 value."""
         state = {"bars": 0, "best": 0.0}
 
         def on_bar(bar: _HookTqdm, new: bool):
-            if bar.total > 1_000_000:  # a model download, not inference
+            if bar.total > 1_000_000:  # a model download (byte-counted), not inference
+                if on_download is not None:
+                    on_download(bar.fraction, bar.n / 1e6)
                 return
             if new:
                 state["bars"] += 1
