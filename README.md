@@ -66,7 +66,7 @@ The apps are built for you by GitHub Actions (free), because a Windows build has
 2. In **Output Settings**, choose where to save, the quality, the format, and optionally the Instrumental track and the Guitar/Piano stems. Each song gets its own subfolder: `Song - Vocals.mp3`, `Song - Drums.mp3`, `Song - Bass.mp3`, `Song - Other.mp3`
 3. Click **Split Stems**. The processing card at the bottom shows the song being split, its progress and the time left, with a **Cancel** button. If some songs fail, click **Split Stems** again to retry only those.
 
-*Show log* and *Open output folder* are next to the Split Stems button. The memory reserve (*Keep free for the system*) is on the **Settings** page; **About** has the version and the models.
+*Show log* and *Open output folder* are next to the Split Stems button. The memory reserve (*Keep free for the system*) and *Ignore the memory limit* are on the **Settings** page; **About** has the version and the models.
 
 **Quality**
 * *Balanced*: the default. Better than the previous version's best setting on every stem, and faster.
@@ -92,7 +92,7 @@ When you add several songs, the next one is already being separated while the pr
 * The app shows which device it is using in the status bar at the bottom of the window, and the log lists how long each step took.
 * `STEMSPLITTER_THREADS` (environment variable) pins the CPU thread count. On the test laptop the default was already the fastest, so only try it if CPU-only runs look slow.
 
-**Memory.** StemSplitter never takes the memory your computer needs to stay responsive. It always leaves a reserve free (*Keep free for the system* on the Settings page: automatic, 2 GB on most machines, or 1–8 GB), uses what is left to go fast, and slows down or waits when other programs need the memory, showing "Waiting for free memory…". No work is lost: every song keeps a checkpoint, so a cancelled or crashed split continues where it stopped. The window itself uses about 83 MB (measured on Windows 11); the AI models run in a separate worker process that quits 30 seconds after the queue is done and gives all of its memory back. Set `STEMSPLITTER_MEMLOG=1` to log the memory use of each step.
+**Memory.** StemSplitter never takes the memory your computer needs to stay responsive. It always leaves a reserve free (*Keep free for the system* on the Settings page: automatic, 2 GB on most machines, or 1–8 GB), uses what is left to go fast, and slows down or waits when other programs need the memory, showing "Waiting for free memory…". No work is lost: every song keeps a checkpoint, so a cancelled or crashed split continues where it stopped. To let it use all the memory it wants, tick *Ignore the memory limit* on the Settings page (`--no-memory-limit` in the CLI): it never waits for memory, but the computer can slow down or swap and the system may end the app if memory runs out (the split then resumes from its checkpoint). The window itself uses about 83 MB (measured on Windows 11); the AI models run in a separate worker process that quits 30 seconds after the queue is done and gives all of its memory back. Set `STEMSPLITTER_MEMLOG=1` to log the memory use of each step.
 On an NVIDIA GPU, *Maximum* keeps only the model that is running in video memory (the other one waits in RAM), so it also fits 4 GB GPUs.
 
 You can close the window and it asks before stopping a job that is still running.
@@ -110,7 +110,7 @@ python main.py --cli song1.mp3 song2.flac -o out_folder     # headless / batch
 python main.py --selftest          # the same check CI runs on the packaged app
 ```
 
-CLI options: `-q balanced|maximum|fast`, `-b 320` (MP3 bitrate), `--wav`, `--instrumental`, `--guitar-piano`, `--reserve-mb 2048` (memory to keep free for the system).
+CLI options: `-q balanced|maximum|fast`, `-b 320` (MP3 bitrate), `--wav`, `--instrumental`, `--guitar-piano`, `--reserve-mb 2048` (memory to keep free for the system), `--no-memory-limit` (ignore the memory limit).
 
 Windows + NVIDIA from source (the PyPI `torch` wheel for Windows is CPU-only): after the install, run
 `pip install --force-reinstall --no-deps torch==<same version> --index-url https://download.pytorch.org/whl/cu130`.

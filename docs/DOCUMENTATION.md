@@ -62,7 +62,7 @@ A dark window with a purple accent, built like an audio production tool: a sideb
 - **Cancel:** stops at the next processed block of audio. Closing the window in the middle of a job asks for confirmation.
 - **Open output folder** with one click, in the processing card. On narrow windows, *Show log* and *Open output folder* show only their icon (with a tooltip).
 - **Locked while running:** as before, the queue can't be changed (no removing or clearing; the row × buttons are disabled) and the options are disabled; *Add Files* and *Add Folder* too. Songs can still be dropped onto the window.
-- **Batch page:** how the queue handles many songs, with *Add Folder* and *Go to Split* buttons. **Settings page:** *Keep free for the system*, how much memory StemSplitter must always leave to the rest of the computer (Automatic, or 1–8 GB). See [section 4.6](#46-memory-governor). **About page:** version, models and licenses.
+- **Batch page:** how the queue handles many songs, with *Add Folder* and *Go to Split* buttons. **Settings page:** *Keep free for the system*, how much memory StemSplitter must always leave to the rest of the computer (Automatic, or 1–8 GB), and *Ignore the memory limit*, which switches the limit off (the reserve is then greyed out). See [section 4.6](#46-memory-governor). **About page:** version, models and licenses.
 - **Memory in use** in the status bar while a queue runs, for example "Memory: 1.4 GB · limit 2.3 GB". When memory is short, the song's stage says "Waiting for free memory (N MB more needed)…" and the work continues as soon as memory frees up.
 - **Nothing is lost on a crash:** if the separation process dies (for example, the system ends it when memory runs out), the window starts it again and every song continues from its last checkpoint. A cancelled song also continues where it stopped when it is split again.
 - **Settings remembered between sessions:** output folder, quality (saved by preset name), format, Instrumental, Guitar/Piano, the memory reserve and the last input folder. The keys are the same as before the redesign, so existing settings carry over.
@@ -89,10 +89,10 @@ The old name `high` is still accepted, as an alias of `balanced`.
 
 ```bash
 python main.py --cli song1.mp3 song2.flac -o output_folder \
-    -q balanced|maximum|fast  -b 320  --wav  --instrumental  --guitar-piano  --reserve-mb 2048
+    -q balanced|maximum|fast  -b 320  --wav  --instrumental  --guitar-piano  --reserve-mb 2048  --no-memory-limit
 ```
 
-`--reserve-mb` is the memory the system must keep free (default: automatic). It prints the device, the progress and where each stem was written. With several songs, one song is written while the next one is separated (see [section 4.3](#43-optimizations-in-place)).
+`--reserve-mb` is the memory the system must keep free (default: automatic); `--no-memory-limit` ignores the limit (see [section 4.6](#46-memory-governor)). It prints the device, the progress and where each stem was written. With several songs, one song is written while the next one is separated (see [section 4.3](#43-optimizations-in-place)).
 
 ### 2.5 Models and user data
 
@@ -291,6 +291,7 @@ The goal: the app never takes the memory the system needs to stay responsive, us
 
 - **Apple GPU:** PyTorch is capped (`torch.mps.set_per_process_memory_fraction`) at what the budget allows, so it raises an out-of-memory error instead of pushing macOS into swap. A chunk that runs out of memory (on any device) is retried after freeing caches and waiting, up to 12 times with growing waits; nothing of that chunk was added yet, so the result is unchanged.
 - **Preloading** a model when songs are added only happens if it fits the budget; it never waits.
+- **Ignoring the limit** (*Ignore the memory limit* on the Settings page, `--no-memory-limit` in the CLI, `Options.ignore_memory_limit`, `MemoryGovernor.set_unlimited()`): the headroom is reported as endless (`UNLIMITED`, 1 PB), so the reserve and the macOS pressure level are ignored, `wait()` returns at once, nothing is unloaded or emptied early, preloading always happens and the level is always *relaxed* (everything in parallel). The Apple GPU cap is removed (`set_per_process_memory_fraction(0.0)`, PyTorch's "no limit"). The governor keeps sampling, so the status bar still shows the memory used ("no limit" instead of the budget). A chunk that really runs out of memory is still retried, but nothing stops the app from pushing the system into swap or being ended by the OS; a split ended that way resumes from its checkpoint. It is off by default. The output is the same either way (the governor only decides when steps run, not what they compute); its speed and memory have not been measured separately.
 
 **3. Checkpoints and restart.** Each song has a work folder (`work/<key>/`, the key covers the file, its size and date, and the options that change the stems) with a `state.json`. The model passes save their position and overlap buffers every 15 s; decoding, each model pass, the assembly and each written file are recorded as they finish. A song that is split again (after a cancel, a crash, or a reboot) continues from there. If the worker process dies in the middle of a queue, the window restarts it (up to 3 times per queue) with the songs that were left. Measured: a split killed (`kill -9`) at 0:51 of a 2:52 song resumed at 0:51 and its files were bit-identical to an uninterrupted run; in the window, a worker killed at 56% was restarted and the song finished.
 
@@ -370,7 +371,8 @@ from stemsplitter.engine import StemEngine, Options
 engine = StemEngine(log=print)            # keeps the loaded models between songs; starts its own memory governor
 opts = Options(output_dir="output", quality="balanced", bitrate_kbps=320,
                output_format="mp3", also_instrumental=False, guitar_piano=False,
-               memory_reserve_mb=0)       # 0 = automatic reserve
+               memory_reserve_mb=0,       # 0 = automatic reserve
+               ignore_memory_limit=False) # True = the governor never waits or holds back
 
 result = engine.separate("song.mp3", opts, progress=lambda frac, text: ...)
 # or, to overlap writing and separation:
@@ -397,7 +399,7 @@ engine.close()
 | Worker process, encoder *pool* (up to N threads) | One ffmpeg/LAME process per stem, as many at once as the governor allows |
 | Worker process, *memory governor* (1 thread) | Samples the memory every 250 ms and sends a `memory` event about once a second while busy |
 
-- **Communication:** two `multiprocessing.Queue`s (*spawn* context). The worker receives the commands `("prepare", quality, reserve_mb)` (preload), `("run", jobs, opts)` (process the queue) and `None` (quit). It sends back the events `status`, `done`, `failed`, `log`, `device`, `memory`, `prepared` and `finished`, delivered in the order they were emitted. Consecutive progress updates for the same song are coalesced.
+- **Communication:** two `multiprocessing.Queue`s (*spawn* context). The worker receives the commands `("prepare", quality, reserve_mb, unlimited)` (preload), `("run", jobs, opts)` (process the queue) and `None` (quit). It sends back the events `status`, `done`, `failed`, `log`, `device`, `memory`, `prepared` and `finished`, delivered in the order they were emitted. Consecutive progress updates for the same song are coalesced.
 - **Lifecycle:** the worker is created when songs are added and loads the preset's model right away (`prepare`, only if the model is already downloaded). It waits up to 90 s for *Split Stems* (`PREWARM_IDLE_SECONDS`), is reused by any queue started within 30 s after a queue ends (`IDLE_SECONDS`), and quits after that or when the window closes. If the process dies midway (for example, ended by the OS when memory runs out), the window starts it again with the songs that were left, each continuing from its checkpoint (`MAX_RESTARTS` = 3 per queue); after that, the remaining songs show as failed and the window keeps working.
 - **Cancellation:** a shared `multiprocessing.Event`, checked between inference blocks (through the progress hook) and before each file is written.
 - **Packaged:** the worker is the executable itself, started through `multiprocessing.freeze_support()` in `main.py`. The CI `--selftest` starts and stops a worker to make sure this works.
@@ -511,6 +513,7 @@ For speed, the log already has the time of every stage. For fine measurements, s
 - **4 GB of VRAM:** other programs using the GPU, including another copy of StemSplitter, can make the separation several times slower. In *Maximum*, only the model in use is kept on the GPU.
 - **First pass of the vocal model:** in some tests, in a new session, it took ~45 s longer than the following ones. The cause was not confirmed and it didn't happen in every measurement. It was probably the same *Maximum* VRAM overflow fixed in `5a51768`, but that has not been verified yet.
 - **Memory floor:** PyTorch, one model and one chunk must fit at the same time (~1.2–1.5 GB of RAM measured on the CUDA build; not measured on Apple Silicon). Below that the app waits for memory instead of running ([4.6](#46-memory-governor)).
+- **Ignore the memory limit:** with this setting on, nothing protects the rest of the computer: it can slow down or swap, and the OS may end the worker (the split then resumes from its checkpoint).
 - **Apple Silicon:** works, but the timings have not been measured yet. The memory governor's macOS parts (memory pressure level, the Apple GPU cap) are only covered by the CI build and self-test, not by a run on a Mac.
 - **Disk space:** a song being split needs up to ~0.3 GB per minute in the data folder until its files are written.
 - **Unsigned apps:** public distribution would need an Apple Developer ID (with notarization) and a Windows code-signing certificate.
@@ -535,4 +538,5 @@ For speed, the log already has the time of every stage. For fine measurements, s
 | `65e678d` | macOS self-test fix: the worker's `Event` was collected before the process could open it |
 | `d39b305` | Documentation brought up to date and translated to English (`docs/DOCUMENTACAO.md` → `docs/DOCUMENTATION.md`); `CLAUDE.md` with the English-only and documentation rules |
 | `fb28734` | Memory governor: streaming inference and file-backed work tracks (bit-identical output, memory no longer grows with the song), budget = used + available − reserve with a user setting, waiting instead of failing, checkpoints per song and automatic restart of a crashed worker |
-| — | Redesigned window: dark theme with a purple accent, sidebar (Split, Batch, Settings, About), drop area with *Add Files* / *Add Folder*, queue rows with state icons and per-song time left, *Output Settings* card (two columns when wide), processing card with an animated bar and *Cancel*, status bar with the device and queue summary; the memory reserve moved to the Settings page and About from the Help menu to a page. Theme tokens, icons and components in `stemsplitter/ui/`. Processing, worker protocol, queue, cancellation and settings keys unchanged; idle window ~70 MB → ~83 MB |
+| `7c4e3b1` | Redesigned window: dark theme with a purple accent, sidebar (Split, Batch, Settings, About), drop area with *Add Files* / *Add Folder*, queue rows with state icons and per-song time left, *Output Settings* card (two columns when wide), processing card with an animated bar and *Cancel*, status bar with the device and queue summary; the memory reserve moved to the Settings page and About from the Help menu to a page. Theme tokens, icons and components in `stemsplitter/ui/`. Processing, worker protocol, queue, cancellation and settings keys unchanged; idle window ~70 MB → ~83 MB |
+| — | *Ignore the memory limit* setting (Settings page, saved between sessions) and `--no-memory-limit` CLI option: the memory governor stops holding back (never waits, always the relaxed level, no Apple GPU cap) and the status bar shows "no limit"; off by default. The `prepare` worker command gained an `unlimited` field and the memory snapshot an `unlimited` key |

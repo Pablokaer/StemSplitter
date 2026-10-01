@@ -13,6 +13,11 @@ models it isn't using) and then waits, keeping all the work done so far, until o
 free memory. It never gives up and never lets the app eat into the reserve. The `level`
 tells the worker how much it may run in parallel (two songs at once, several encoders).
 
+The limit can be switched off (`set_unlimited`, the "Ignore the memory limit" setting): the
+headroom is then treated as endless, so the app never waits, never frees caches early and always
+runs at the "relaxed" level. It keeps measuring, so the memory indicator still works, but the
+system can run out of memory and swap or end the app.
+
 On macOS the kernel's memory pressure level is used as well: it reflects the risk of the
 system stalling better than the "available" figure, because macOS compresses memory first.
 """
@@ -31,6 +36,7 @@ GB = 1024**3
 # headroom thresholds for the levels (see MemoryGovernor.level)
 RELAXED = 2 * GB
 NORMAL = 512 * MB
+UNLIMITED = 1 << 50  # the headroom reported when the limit is off (1 PB: more than any machine has)
 
 
 def total_memory() -> int:
@@ -110,6 +116,7 @@ class MemoryGovernor:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self.waiting = False
+        self.unlimited = False
         self.available = self.used = 0
         self.pressure = 0
         self._low_water = self._mark = 1 << 62
@@ -120,6 +127,10 @@ class MemoryGovernor:
     def set_reserve(self, reserve_bytes: int = 0) -> None:
         """Memory the system must keep free; 0 = automatic."""
         self.reserve = int(reserve_bytes) if reserve_bytes and reserve_bytes > 0 else default_reserve()
+
+    def set_unlimited(self, unlimited: bool = False) -> None:
+        """True: ignore the reserve and the macOS pressure; every `wait` returns at once."""
+        self.unlimited = bool(unlimited)
 
     def add_shedder(self, fn: Callable[[str], None]) -> None:
         """`fn(level)` frees what it can; called when memory runs short, before waiting."""
@@ -138,6 +149,8 @@ class MemoryGovernor:
     @property
     def headroom(self) -> int:
         """How much more the app may take right now (negative: it should give some back)."""
+        if self.unlimited:
+            return UNLIMITED
         room = self.available - self.reserve
         if self.pressure >= 4:  # critical: macOS is about to stall
             room = min(room, -1)
@@ -177,7 +190,7 @@ class MemoryGovernor:
 
     def snapshot(self) -> dict:
         return {"used": self.used, "budget": self.budget, "available": self.available, "reserve": self.reserve,
-                "level": self.level(), "waiting": self.waiting}
+                "level": self.level(), "waiting": self.waiting, "unlimited": self.unlimited}
 
     # -- controlling --------------------------------------------------------------------
     def shed(self) -> None:

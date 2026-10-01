@@ -125,6 +125,7 @@ class Options:
     guitar_piano: bool = False  # also split Guitar and Piano out of Other
     output_format: str = "mp3"  # "mp3" or "wav"
     memory_reserve_mb: int = 0  # memory the system must keep free; 0 = automatic (see memgov.py)
+    ignore_memory_limit: bool = False  # True: the governor never waits or holds back (see memgov.py)
 
 
 @dataclass
@@ -747,13 +748,17 @@ class StemEngine:
 
     def _limit_mps(self) -> None:
         """Apple GPU: cap PyTorch at what the budget allows, so it raises (and the chunk is retried)
-        instead of pushing macOS into swap. CUDA has its own VRAM; the CPU path uses the governor."""
+        instead of pushing macOS into swap. CUDA has its own VRAM; the CPU path uses the governor.
+        With the limit off there is no cap."""
         torch = sys.modules.get("torch")
         try:
             if torch is None or not torch.backends.mps.is_available():
                 return
-            allowed = torch.mps.driver_allocated_memory() + max(self.gov.headroom, 0)
-            fraction = min(1.0, max(0.05, allowed / torch.mps.recommended_max_memory()))
+            if self.gov.unlimited:
+                fraction = 0.0  # PyTorch: 0 = no cap
+            else:
+                allowed = torch.mps.driver_allocated_memory() + max(self.gov.headroom, 0)
+                fraction = min(1.0, max(0.05, allowed / torch.mps.recommended_max_memory()))
             if abs(fraction - getattr(self, "_mps_fraction", 0.0)) > 0.02:
                 torch.mps.set_per_process_memory_fraction(fraction)
                 self._mps_fraction = fraction

@@ -132,7 +132,7 @@ class EngineProcess(QObject):
         self._commands.put(("run", jobs, opts))
         self._poll.start()
 
-    def prewarm(self, quality: str, reserve_mb: int = 0) -> None:
+    def prewarm(self, quality: str, reserve_mb: int = 0, unlimited: bool = False) -> None:
         """Start the worker and load the preset's models in the background (no-op while busy)."""
         if self.busy:
             return
@@ -140,7 +140,7 @@ class EngineProcess(QObject):
             self._cleanup()
         if self._proc is None:
             self._spawn()
-        self._commands.put(("prepare", quality, reserve_mb))
+        self._commands.put(("prepare", quality, reserve_mb, unlimited))
         self._idle.start(max(self._idle.remainingTime(), self.PREWARM_IDLE_SECONDS * 1000))
         self._poll.start()
 
@@ -316,6 +316,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.batch_page)
         self.settings_page = SettingsPage(RESERVES)
         self.reserve = self.settings_page.reserve
+        self.chk_unlimited = self.settings_page.chk_unlimited
         self.pages.addWidget(self.settings_page)
         self.pages.addWidget(AboutPage(APP_NAME, __version__))
         self.sidebar.page_changed.connect(self.pages.setCurrentIndex)
@@ -423,6 +424,7 @@ class MainWindow(QMainWindow):
         self.chk_inst.setChecked(self.settings.value("instrumental", "false") == "true")
         self.chk_gp.setChecked(self.settings.value("guitar_piano", "false") == "true")
         self.reserve.setCurrentIndex(max(0, self.reserve.findData(int(self.settings.value("memory_reserve_mb", 0)))))
+        self.chk_unlimited.setChecked(self.settings.value("ignore_memory_limit", "false") == "true")
         self._on_options_changed()
 
     def _save_settings(self):
@@ -432,6 +434,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("instrumental", "true" if self.chk_inst.isChecked() else "false")
         self.settings.setValue("guitar_piano", "true" if self.chk_gp.isChecked() else "false")
         self.settings.setValue("memory_reserve_mb", self.reserve.currentData())
+        self.settings.setValue("ignore_memory_limit", "true" if self.chk_unlimited.isChecked() else "false")
 
     def _on_options_changed(self, *args):
         self.output.quality_hint.setText(QUALITY_HINTS.get(self.quality.currentData(), ""))
@@ -447,7 +450,8 @@ class MainWindow(QMainWindow):
             self.list.add_entry(p)
             existing.add(p)
         if self.list.count():
-            self.engine.prewarm(self.quality.currentData(), self.reserve.currentData())
+            self.engine.prewarm(self.quality.currentData(), self.reserve.currentData(),
+                                self.chk_unlimited.isChecked())
 
     def _pick_files(self):
         start = self.settings.value("last_input_dir", str(Path.home()))
@@ -555,6 +559,7 @@ class MainWindow(QMainWindow):
             guitar_piano=self.chk_gp.isChecked(),
             output_format=fmt,
             memory_reserve_mb=self.reserve.currentData(),
+            ignore_memory_limit=self.chk_unlimited.isChecked(),
         )
 
         for row, _ in jobs:
@@ -574,8 +579,9 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(not running)
         self.btn_cancel.setEnabled(running)
         for w in (self.btn_add, self.btn_add_folder, self.batch_page.btn_folder, self.btn_remove, self.btn_clear,
-                  self.quality, self.fmt, self.chk_inst, self.chk_gp, self.out_edit, self.reserve):
+                  self.quality, self.fmt, self.chk_inst, self.chk_gp, self.out_edit, self.chk_unlimited):
             w.setEnabled(not running)
+        self.reserve.setEnabled(not running and not self.chk_unlimited.isChecked())
         self.list.set_locked(running)
         self.panel.set_running(running)
 
@@ -623,7 +629,10 @@ class MainWindow(QMainWindow):
     @Slot(dict)
     def _on_memory(self, snap: dict):
         gb = 1024**3
-        text = f"Memory: {snap['used'] / gb:.1f} GB · limit {snap['budget'] / gb:.1f} GB"
+        if snap.get("unlimited"):
+            text = f"Memory: {snap['used'] / gb:.1f} GB · no limit"
+        else:
+            text = f"Memory: {snap['used'] / gb:.1f} GB · limit {snap['budget'] / gb:.1f} GB"
         if snap.get("waiting"):
             text += " · waiting for free memory"
         self.status_bar.set_memory(text)

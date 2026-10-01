@@ -9,16 +9,18 @@ The worker also runs the memory governor (memgov.py), which keeps it below the m
 system needs to stay responsive.
 
 Commands from the GUI (the `commands` queue):
-  ("prepare", quality, reserve_mb)   load PyTorch and the preset's models ahead of time (only
+  ("prepare", quality, reserve_mb, unlimited)
+                                     load PyTorch and the preset's models ahead of time (only
                                      models already downloaded, and only if they fit in the
-                                     memory budget: preloading never waits)
+                                     memory budget: preloading never waits; unlimited = ignore
+                                     the memory limit)
   ("run", jobs, opts)                split [(row, path)]
   None                               exit
 
 Messages to the GUI are tuples put on the `events` queue:
   ("status", row, fraction, text)   ("done", row, {stem: path}, seconds)   ("failed", row, message)
   ("log", text)   ("device", text)   ("prepared",)   ("finished", cancelled)
-  ("memory", {"used", "budget", "available", "reserve", "level", "waiting"})  about once a second while busy
+  ("memory", {"used", "budget", "available", "reserve", "level", "waiting", "unlimited"})  about once a second while busy
 """
 
 from __future__ import annotations
@@ -147,6 +149,7 @@ def serve(commands, events, cancel) -> None:
             break
         if command[0] == "prepare":
             governor.set_reserve(command[2] * MB)
+            governor.set_unlimited(command[3])
             try:
                 _prepare(get_engine(), command[1], log)
             except Exception:  # not fatal: the run loads (or downloads) the models again
@@ -155,6 +158,7 @@ def serve(commands, events, cancel) -> None:
             continue
         _, jobs, opts = command
         governor.set_reserve(opts.memory_reserve_mb * MB)
+        governor.set_unlimited(opts.ignore_memory_limit)
         cancelled = False
         busy = True
         try:
