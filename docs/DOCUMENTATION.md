@@ -45,23 +45,28 @@ In short:
 
 ### 2.1 Desktop window
 
-- **Drag and drop** files or folders. Folders are scanned recursively and only supported formats are added. Duplicate files are ignored.
-- **Add files…**, **Remove selected** and **Clear list** buttons.
-- **Queue with a status per song:** ⏳ queued, ▶️ processing (with %), ✅ done (with the time taken), ⚠️ error (with the message), ⏹ cancelled.
-- **Retry only what failed:** pressing *Split stems* again only picks up queued or failed songs.
-- **Preloaded model:** when songs are added, PyTorch and the preset's model start loading in the background, so *Split stems* starts almost at once.
+A dark window with a purple accent, built like an audio production tool: a sidebar on the left (**Split**, **Batch**, **Settings**, **About**) and the page on the right, with the processing card and a status bar always at the bottom. It opens at 1400×850 (minimum 1100×700, both reduced to fit smaller screens) and every part follows the window's width. There is no menu bar.
+
+- **Split page:** title, a large drag & drop area, the *Files to process* card, the *Output Settings* card and the log; the page scrolls when the window is short.
+- **Drag and drop** files or folders onto the drop area or the list. Folders are scanned recursively and only supported formats are added. Duplicate files are ignored. While something is dragged over the drop area, its border and background light up.
+- **Add Files** and **Add Folder** buttons in the drop area (*Add Folder* adds a folder exactly like dropping it). *Remove selected* and *Clear list* in the queue's header, and an × on every row.
+- **Queue with a status per song:** each row has a checkbox (it selects the row, like a click; Ctrl/Shift+click also work), the file name (shortened with "…" when it doesn't fit, full path in the tooltip), its format, size and folder, and its state with an icon and text: *Queued* (clock), *Processing…* (purple progress ring, "27% · 1m 48s remaining"), *Completed* (green check, "done in 1m 12s"), *Failed* (red mark and the error), *Cancelled* (stop mark, "resumes where it stopped"). The list shows up to 6 rows and scrolls beyond that; with no songs it shows a small empty state.
+- **Retry only what failed:** pressing *Split Stems* again only picks up queued, cancelled or failed songs.
+- **Preloaded model:** when songs are added, PyTorch and the preset's model start loading in the background, so *Split Stems* starts almost at once.
 - **Robust batches:** a broken file fails on its own and the rest of the batch keeps going.
-- **Progress bar and status:** shows the stage (decoding, model download with MB and %, separation, writing) and the overall progress.
-- **Device in use** at the bottom, for example "NVIDIA GPU · RTX 3050 Laptop GPU", "Apple Silicon GPU (Metal)" or "CPU · 12 threads".
-- **Log** that can be shown or hidden, with the time of every stage per song. It opens by itself when there is an error.
+- **Output Settings card:** *Save stems to* with *Browse…*, *Quality* with a one-line description of the selected preset, *Output format*, and the Instrumental and Guitar/Piano options. Two columns when the window is wide enough, one column otherwise.
+- **Processing card:** idle, it sums up what *Split Stems* will do ("3 songs to split · Balanced (recommended) · MP3 · 320 kbps") next to the *Split Stems* button. While a queue runs, it shows the song being separated, the stage (decoding, model download with MB, separation, writing, waiting for memory), an animated progress bar, the percentage and the time left, and *Cancel* takes the place of *Split Stems*. When song N is being written while song N+1 is separated, the card follows song N+1 and each row keeps its own progress. At the end it shows the result ("All done — 3 song(s) split", "Finished with 1 error(s) — see the log" or "Cancelled").
+- **Time left:** estimated in the window from the song's own progress rate since its separation started; the time spent starting the engine, loading or downloading a model or waiting for memory is left out. Nothing is shown during the first 5 s or the first 2% of a song.
+- **Status bar:** the device in use (for example "Processing on: NVIDIA GPU · NVIDIA GeForce RTX 3050 Laptop GPU", "Apple Silicon GPU (Metal)" or "CPU · 12 threads"; before the engine starts, "Device: detected when songs are added"), the memory in use while a queue runs, and the queue summary ("3 files | 2 completed | 1 processing | 1 failed").
+- **Log** that can be shown or hidden (*Show log* in the processing card), with the time of every stage per song. It opens by itself when there is an error.
 - **Cancel:** stops at the next processed block of audio. Closing the window in the middle of a job asks for confirmation.
-- **Open output folder** with one click.
-- **Keep free for the system:** how much memory StemSplitter must always leave to the rest of the computer (Automatic, or 1–8 GB). See [section 4.6](#46-memory-governor).
-- **Memory in use** at the bottom while a queue runs, for example "Memory: 1.4 GB · limit 2.3 GB". When memory is short, the song's status says "Waiting for free memory (N MB more needed)…" and the work continues as soon as memory frees up.
+- **Open output folder** with one click, in the processing card. On narrow windows, *Show log* and *Open output folder* show only their icon (with a tooltip).
+- **Locked while running:** as before, the queue can't be changed (no removing or clearing; the row × buttons are disabled) and the options are disabled; *Add Files* and *Add Folder* too. Songs can still be dropped onto the window.
+- **Batch page:** how the queue handles many songs, with *Add Folder* and *Go to Split* buttons. **Settings page:** *Keep free for the system*, how much memory StemSplitter must always leave to the rest of the computer (Automatic, or 1–8 GB). See [section 4.6](#46-memory-governor). **About page:** version, models and licenses.
+- **Memory in use** in the status bar while a queue runs, for example "Memory: 1.4 GB · limit 2.3 GB". When memory is short, the song's stage says "Waiting for free memory (N MB more needed)…" and the work continues as soon as memory frees up.
 - **Nothing is lost on a crash:** if the separation process dies (for example, the system ends it when memory runs out), the window starts it again and every song continues from its last checkpoint. A cancelled song also continues where it stopped when it is split again.
-- **Settings remembered between sessions:** output folder, quality (saved by preset name), format, Instrumental, Guitar/Piano, the memory reserve and the last input folder.
-- **Theme:** Fusion style with an accent color; on macOS it follows the system dark mode.
-- **Help → About** menu with the versions and the models in use.
+- **Settings remembered between sessions:** output folder, quality (saved by preset name), format, Instrumental, Guitar/Piano, the memory reserve and the last input folder. The keys are the same as before the redesign, so existing settings carry over.
+- **Look:** Qt's Fusion style with a style sheet built from the tokens in `stemsplitter/ui/theme.py` (colors, type sizes, spacing, radii), the same dark theme on every OS, and a dark title bar on Windows 11 and macOS (Qt 6.8+ color scheme). Font: Inter when installed, otherwise Segoe UI Variable / Segoe UI on Windows and the system font on macOS; no font is bundled. Icons are one outline family drawn from inline SVG (`stemsplitter/ui/icons.py`), with no icon files.
 
 ### 2.2 Quality presets
 
@@ -102,7 +107,7 @@ python main.py --cli song1.mp3 song2.flac -o output_folder \
 - **Apple Silicon (Metal/MPS):** used automatically on the Mac. Rare operations without MPS support fall back to the CPU (`PYTORCH_ENABLE_MPS_FALLBACK=1`).
 - **CPU:** used only when there is no compatible GPU.
 - **`STEMSPLITTER_THREADS=N`:** pins the number of CPU threads, for testing.
-- **`STEMSPLITTER_MEM_RESERVE_MB=N`:** sets the memory reserve (overrides the automatic one; the window's setting overrides this).
+- **`STEMSPLITTER_MEM_RESERVE_MB=N`:** sets the memory reserve (overrides the automatic one; the setting on the window's Settings page overrides this).
 - **`STEMSPLITTER_MEMLOG=1`:** logs the RAM (and the VRAM, once PyTorch is loaded) at every stage: worker started, audio decoded, model loaded, inference done, stems assembled, files written, queue finished and worker stopped.
 
 ---
@@ -174,7 +179,7 @@ Laptop with an Intel i5-12500H and an NVIDIA RTX 3050 Laptop (4 GB). 4-minute so
 | NVIDIA GPU (RTX 3050 Laptop) | ~30 s | ~1 min | ~1 min 45 s |
 | CPU only (12 cores, laptop) | ~20 min | ~28 min | slower still |
 
-Measured directly: a 5:20 song in Balanced takes **77 s** with the model already loaded, and a batch of 2 songs takes **156 s**. Loading the model costs ~3 s and, since the preloading, usually happens before *Split stems* is pressed. Apple Silicon timings have not been measured yet.
+Measured directly: a 5:20 song in Balanced takes **77 s** with the model already loaded, and a batch of 2 songs takes **156 s**. Loading the model costs ~3 s and, since the preloading, usually happens before *Split Stems* is pressed. Apple Silicon timings have not been measured yet.
 
 The *Maximum* time was measured before it started keeping only one model at a time in VRAM ([section 4.5](#45-scalability-and-memory-use)) and should now be lower. On a 60 s clip it now takes ~1.5× the Balanced time, but a full song still has to be measured. Since the streaming engine ([4.6](#46-memory-governor)) a 2:52 song in Balanced took 51.8 s, against 66.1 s with the previous engine, measured back to back on the same laptop; these timings were not re-measured for a 4-minute song.
 
@@ -244,7 +249,7 @@ All measured on the RTX 3050:
 
 - **One GPU, one job at a time.** Two simultaneous inferences on a 4 GB GPU fight over the VRAM, Windows starts using system RAM and everything becomes **several times slower**. This was seen with a second copy of the app open: up to 8× slower.
 - **Bounded pipelining:** at most one song waits to be written, and only while the memory governor's headroom is relaxed ([4.6](#46-memory-governor)); otherwise songs go one at a time. The stems themselves are in files, not in RAM.
-- **The AI runs in a separate process (worker).** The window doesn't import PyTorch and uses ~50 MB. The worker is created as soon as songs are added and loads the preset's model in the background (only if the model is already downloaded; it waits up to 90 s for *Split stems*), which takes ~6 s off the wait. It loads the model once for the whole queue and quits 30 s after the queue is done (`EngineProcess.IDLE_SECONDS`). Only ending the process reliably gives the memory of PyTorch, CUDA and the C libraries back to the system: in the same process, ~2.1 GB stayed resident even after `engine.close()`.
+- **The AI runs in a separate process (worker).** The window doesn't import PyTorch and uses ~83 MB (working set, idle, empty queue; measured after the redesign of the window, see the note below the table). The worker is created as soon as songs are added and loads the preset's model in the background (only if the model is already downloaded; it waits up to 90 s for *Split Stems*), which takes ~6 s off the wait. It loads the model once for the whole queue and quits 30 s after the queue is done (`EngineProcess.IDLE_SECONDS`). Only ending the process reliably gives the memory of PyTorch, CUDA and the C libraries back to the system: in the same process, ~2.1 GB stayed resident even after `engine.close()`.
 - **One instance per model.** The overlap is just an attribute read on every `demix()`, so Balanced and Fast share the same BS-RoFormer. Leaving Maximum unloads MelBand-RoFormer. Before, switching between presets left up to 3 instances loaded.
 - **One model at a time in VRAM (CUDA).** In Maximum, the idle model waits in RAM while the other one runs (`_place_on_gpu`); the swap takes a fraction of a second. With both on the 4 GB GPU, the VRAM reservation reached 4.3 GB, Windows started using system RAM and a 60 s clip took ~860 s. It now takes ~23 s, with 1.8 GB reserved and bit-identical output. On Apple Silicon the memory is shared, so nothing changes there.
 - **On the CPU,** inference dominates even more: ~3.3× real time per pass.
@@ -259,6 +264,8 @@ Measured when the worker process was introduced (`f275d9b`, before the streaming
 | RAM after the queue | ~2.1 GB (held until the app closed) | ~60 MB (the worker quits 30 s later) |
 | Balanced → Fast → Maximum → Balanced in the same engine | 3 instances, 2.30 GB | 1 instance, 1.67 GB |
 
+The idle window was measured again for the redesigned window (Windows 11, Python 3.13, PySide6 6.11.2, i5-12500H, empty queue, 1400×850, median of 10 samples taken 3–12 s after opening, 3 runs each): the previous window **~70 MB** working set (~34 MB private), the redesigned one **~83 MB** (~46 MB private). The extra ~13 MB is QtSvg and the larger widget tree. The ~53 MB in the table comes from `f275d9b` under different conditions and was not measured again on that setup.
+
 ### 4.6 Memory governor
 
 The goal: the app never takes the memory the system needs to stay responsive, uses what is free to go fast, and never loses work when memory runs short. Three parts make this possible.
@@ -270,7 +277,7 @@ The goal: the app never takes the memory the system needs to stay responsive, us
 > **budget = what the app uses now + memory the system has available − reserve**
 > **headroom = budget − what the app uses now = available − reserve**
 
-- **Reserve:** what the system must keep free. Automatic: 2 GB, or a quarter of the RAM on machines with less than 8 GB. The user can pick 1–8 GB in the window (`--reserve-mb` in the CLI). Examples: 5 GB available and a 2 GB reserve → the app may take 3 GB more; 3 GB available → 1 GB.
+- **Reserve:** what the system must keep free. Automatic: 2 GB, or a quarter of the RAM on machines with less than 8 GB. The user can pick 1–8 GB on the window's Settings page (`--reserve-mb` in the CLI). Examples: 5 GB available and a 2 GB reserve → the app may take 3 GB more; 3 GB available → 1 GB.
 - **macOS:** the kernel's memory pressure level (`kern.memorystatus_vm_pressure_level`) also counts: "warning" limits the headroom to below 512 MB and "critical" makes it negative, because macOS compresses memory before "available" drops.
 - **Before every step that needs memory** (loading a model, each inference chunk, each encoder) the engine calls `wait(need)`. The cost of a chunk is measured on the machine as it runs (how far available memory dropped during the previous chunk), and the cost of loading a model is measured the first time it loads (0.70 GB model: ~0.76 GB; 0.91 GB model: ~0.74–0.97 GB).
 - **What it changes, by headroom:**
@@ -311,7 +318,11 @@ With memory to spare, *Maximum* still peaks about as high as before: with a rela
 |---|---|
 | `main.py` | Entry point: window (default), `--cli` and `--selftest` |
 | `stemsplitter/engine.py` | The whole audio pipeline: presets, models, decoding, separation, stem assembly and writing |
-| `stemsplitter/gui.py` | PySide6 interface: window, queue, settings and the `EngineProcess`, which starts and stops the worker |
+| `stemsplitter/gui.py` | The window's logic (queue, settings, run, progress) and the `EngineProcess`, which starts and stops the worker |
+| `stemsplitter/ui/theme.py` | Design tokens (colors, type sizes, spacing, radii, window sizes) and the Qt style sheet built from them |
+| `stemsplitter/ui/icons.py` | The outline icon set and the app mark, drawn from inline SVG with QtSvg |
+| `stemsplitter/ui/widgets.py` | The window's components: `Sidebar`, `DropZone`, `FileQueue`/`FileList`/`FileRow`, `OutputSettings`, `ProcessingPanel`, `StatusBar` and small helpers. They show state and emit signals; they don't know about the engine |
+| `stemsplitter/ui/pages.py` | The Batch, Settings and About pages |
 | `stemsplitter/worker.py` | Worker process: runs the queue on the engine and sends progress, logs and results to the GUI |
 | `stemsplitter/memgov.py` | The memory governor: budget, levels, waiting, macOS memory pressure ([4.6](#46-memory-governor)) |
 | `stemsplitter/memory.py` | Memory measurement for debugging (`STEMSPLITTER_MEMLOG=1`) |
@@ -387,7 +398,7 @@ engine.close()
 | Worker process, *memory governor* (1 thread) | Samples the memory every 250 ms and sends a `memory` event about once a second while busy |
 
 - **Communication:** two `multiprocessing.Queue`s (*spawn* context). The worker receives the commands `("prepare", quality, reserve_mb)` (preload), `("run", jobs, opts)` (process the queue) and `None` (quit). It sends back the events `status`, `done`, `failed`, `log`, `device`, `memory`, `prepared` and `finished`, delivered in the order they were emitted. Consecutive progress updates for the same song are coalesced.
-- **Lifecycle:** the worker is created when songs are added and loads the preset's model right away (`prepare`, only if the model is already downloaded). It waits up to 90 s for *Split stems* (`PREWARM_IDLE_SECONDS`), is reused by any queue started within 30 s after a queue ends (`IDLE_SECONDS`), and quits after that or when the window closes. If the process dies midway (for example, ended by the OS when memory runs out), the window starts it again with the songs that were left, each continuing from its checkpoint (`MAX_RESTARTS` = 3 per queue); after that, the remaining songs show as failed and the window keeps working.
+- **Lifecycle:** the worker is created when songs are added and loads the preset's model right away (`prepare`, only if the model is already downloaded). It waits up to 90 s for *Split Stems* (`PREWARM_IDLE_SECONDS`), is reused by any queue started within 30 s after a queue ends (`IDLE_SECONDS`), and quits after that or when the window closes. If the process dies midway (for example, ended by the OS when memory runs out), the window starts it again with the songs that were left, each continuing from its checkpoint (`MAX_RESTARTS` = 3 per queue); after that, the remaining songs show as failed and the window keeps working.
 - **Cancellation:** a shared `multiprocessing.Event`, checked between inference blocks (through the progress hook) and before each file is written.
 - **Packaged:** the worker is the executable itself, started through `multiprocessing.freeze_support()` in `main.py`. The CI `--selftest` starts and stops a worker to make sure this works.
 - **Careful when touching the spawn:** the queues and the `Event` must stay referenced in the parent process (for example, on `self`). `Process.start()` drops its own arguments, and on macOS/Linux a collected `Event` deletes its semaphore before the worker can open it (`FileNotFoundError`). On Windows the error doesn't show up, because the handles are duplicated into the child. This is what broke the Mac self-test from `f275d9b` to `a1ea3c3`.
@@ -486,7 +497,8 @@ For speed, the log already has the time of every stage. For fine measurements, s
 
 ### 7.4 Extension points
 
-- **New preset:** add a `Preset` to `QUALITY_PRESETS` (`engine.py`) and an entry to `QUALITIES` (`gui.py`).
+- **New preset:** add a `Preset` to `QUALITY_PRESETS` (`engine.py`) and entries to `QUALITIES` and `QUALITY_HINTS` (`gui.py`).
+- **Look of the window:** colors, sizes and spacing are tokens in `stemsplitter/ui/theme.py`; new icons are SVG shapes in `_SHAPES` (`stemsplitter/ui/icons.py`). A new sidebar page is an entry in `Sidebar.PAGES` and a widget added to the window's page stack in the same order.
 - **Another model:** any MDXC/RoFormer model from the `audio-separator` catalog can be loaded by `_separator()` and run by `_run_model()`. The result is a `stem → (samples × channels)` dictionary.
 - **New output format:** in `_write_stem()`.
 
@@ -522,4 +534,5 @@ For speed, the log already has the time of every stage. For fine measurements, s
 | `a1ea3c3` | CI: a failed macOS self-test is published as an annotation |
 | `65e678d` | macOS self-test fix: the worker's `Event` was collected before the process could open it |
 | `d39b305` | Documentation brought up to date and translated to English (`docs/DOCUMENTACAO.md` → `docs/DOCUMENTATION.md`); `CLAUDE.md` with the English-only and documentation rules |
-| — | Memory governor: streaming inference and file-backed work tracks (bit-identical output, memory no longer grows with the song), budget = used + available − reserve with a user setting, waiting instead of failing, checkpoints per song and automatic restart of a crashed worker |
+| `fb28734` | Memory governor: streaming inference and file-backed work tracks (bit-identical output, memory no longer grows with the song), budget = used + available − reserve with a user setting, waiting instead of failing, checkpoints per song and automatic restart of a crashed worker |
+| — | Redesigned window: dark theme with a purple accent, sidebar (Split, Batch, Settings, About), drop area with *Add Files* / *Add Folder*, queue rows with state icons and per-song time left, *Output Settings* card (two columns when wide), processing card with an animated bar and *Cancel*, status bar with the device and queue summary; the memory reserve moved to the Settings page and About from the Help menu to a page. Theme tokens, icons and components in `stemsplitter/ui/`. Processing, worker protocol, queue, cancellation and settings keys unchanged; idle window ~70 MB → ~83 MB |

@@ -19,7 +19,7 @@ A desktop app for **Windows and macOS** that takes a song (MP3, WAV, FLAC, M4A, 
 * **Uses your GPU automatically**: NVIDIA (CUDA) on Windows, the Metal GPU on Apple Silicon. It falls back to the CPU only when there is no GPU.
 * **Batch processing**: drop files or whole folders. Each song shows its own status, a broken file doesn't stop the batch, and the next song is separated while the previous one is written to disk.
 * **Output**: MP3 at 320, 256 or 192 kbps, or 24-bit WAV, in one subfolder per song. The stems add back up to the original song exactly.
-* **Easy to use**: progress and the device in use are shown in the window, there is a log with the time of every step, you can cancel, and your settings are remembered. The models download themselves on first use, with progress shown.
+* **Easy to use**: a dark, modern window with a drop area, a queue that shows each song's state and time left, a processing card with the progress and a *Cancel* button, and a status bar with the device in use. There is a log with the time of every step, and your settings are remembered. The models download themselves on first use, with progress shown.
 * **Command line** for scripting and batches (`--cli`), and a self-test (`--selftest`) used by CI.
 
 ## How it gets such clean stems
@@ -62,9 +62,11 @@ The apps are built for you by GitHub Actions (free), because a Windows build has
 
 ## Using it
 
-1. Drag songs (or a whole folder) onto the window, or click **Add files…**
-2. Choose where to save, the quality, the format, and optionally the Instrumental track and the Guitar/Piano stems. Each song gets its own subfolder: `Song - Vocals.mp3`, `Song - Drums.mp3`, `Song - Bass.mp3`, `Song - Other.mp3`
-3. Click **Split stems**. If some songs fail, click it again to retry only those.
+1. Drag songs (or a whole folder) onto the drop area, or click **Add Files** or **Add Folder**.
+2. In **Output Settings**, choose where to save, the quality, the format, and optionally the Instrumental track and the Guitar/Piano stems. Each song gets its own subfolder: `Song - Vocals.mp3`, `Song - Drums.mp3`, `Song - Bass.mp3`, `Song - Other.mp3`
+3. Click **Split Stems**. The processing card at the bottom shows the song being split, its progress and the time left, with a **Cancel** button. If some songs fail, click **Split Stems** again to retry only those.
+
+*Show log* and *Open output folder* are next to the Split Stems button. The memory reserve (*Keep free for the system*) is on the **Settings** page; **About** has the version and the models.
 
 **Quality**
 * *Balanced*: the default. Better than the previous version's best setting on every stem, and faster.
@@ -87,10 +89,10 @@ When you add several songs, the next one is already being separated while the pr
 **Tips for speed**
 * Almost all of the time is the AI model itself, so the preset is the real speed knob.
 * On GPUs with little memory (4 GB), close other apps that use the GPU (games, video editors, a second copy of StemSplitter). When the GPU runs out of memory Windows borrows system RAM and the split can get several times slower.
-* The app shows which device it is using at the bottom of the window, and the log lists how long each step took.
+* The app shows which device it is using in the status bar at the bottom of the window, and the log lists how long each step took.
 * `STEMSPLITTER_THREADS` (environment variable) pins the CPU thread count. On the test laptop the default was already the fastest, so only try it if CPU-only runs look slow.
 
-**Memory.** StemSplitter never takes the memory your computer needs to stay responsive. It always leaves a reserve free (*Keep free for the system*: automatic, 2 GB on most machines, or 1–8 GB), uses what is left to go fast, and slows down or waits when other programs need the memory, showing "Waiting for free memory…". No work is lost: every song keeps a checkpoint, so a cancelled or crashed split continues where it stopped. The window itself uses about 50 MB; the AI models run in a separate worker process that quits 30 seconds after the queue is done and gives all of its memory back. Set `STEMSPLITTER_MEMLOG=1` to log the memory use of each step.
+**Memory.** StemSplitter never takes the memory your computer needs to stay responsive. It always leaves a reserve free (*Keep free for the system* on the Settings page: automatic, 2 GB on most machines, or 1–8 GB), uses what is left to go fast, and slows down or waits when other programs need the memory, showing "Waiting for free memory…". No work is lost: every song keeps a checkpoint, so a cancelled or crashed split continues where it stopped. The window itself uses about 83 MB (measured on Windows 11); the AI models run in a separate worker process that quits 30 seconds after the queue is done and gives all of its memory back. Set `STEMSPLITTER_MEMLOG=1` to log the memory use of each step.
 On an NVIDIA GPU, *Maximum* keeps only the model that is running in video memory (the other one waits in RAM), so it also fits 4 GB GPUs.
 
 You can close the window and it asks before stopping a job that is still running.
@@ -122,7 +124,8 @@ Lint (the same check as CI): `pip install ruff==0.16.9 && ruff check .`
 ```
 main.py                         entry point (GUI, --cli, --selftest)
 stemsplitter/engine.py          separation pipeline (decode → RoFormer models → stems → MP3/WAV), all in memory
-stemsplitter/gui.py             PySide6 interface; starts and stops the worker process
+stemsplitter/gui.py             PySide6 window logic; starts and stops the worker process
+stemsplitter/ui/                the window's look: theme tokens, icons, components and pages
 stemsplitter/worker.py          worker process: runs the queue on the engine, reports progress to the GUI
 stemsplitter/memgov.py          memory governor: keeps the app below what the system needs free
 stemsplitter/memory.py          memory logging (STEMSPLITTER_MEMLOG=1)
