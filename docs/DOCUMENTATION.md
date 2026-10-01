@@ -37,6 +37,7 @@ In short:
 - **Output:** one file per stem, as MP3 (320, 256 or 192 kbps) or 24-bit WAV, in one subfolder per song (`Song/Song - Vocals.mp3`, …).
 - **Engine:** BS-RoFormer SW (all stems in one pass) and, in the *Maximum* preset, also MelBand-RoFormer for the vocals. The models run on PyTorch, on the NVIDIA (CUDA) or Apple (Metal) GPU, with an automatic fallback to the CPU.
 - **Interfaces:** a desktop window (PySide6/Qt), a command line (`--cli`) and a self-test (`--selftest`) used by CI.
+- **Memory:** the app never takes the memory the system needs to stay responsive. It speeds up when memory is free and slows down or waits when it is short, without losing work ([section 4.6](#46-memory-governor)).
 
 ---
 
@@ -55,7 +56,10 @@ In short:
 - **Log** that can be shown or hidden, with the time of every stage per song. It opens by itself when there is an error.
 - **Cancel:** stops at the next processed block of audio. Closing the window in the middle of a job asks for confirmation.
 - **Open output folder** with one click.
-- **Settings remembered between sessions:** output folder, quality (saved by preset name), format, Instrumental, Guitar/Piano and the last input folder.
+- **Keep free for the system:** how much memory StemSplitter must always leave to the rest of the computer (Automatic, or 1–8 GB). See [section 4.6](#46-memory-governor).
+- **Memory in use** at the bottom while a queue runs, for example "Memory: 1.4 GB · limit 2.3 GB". When memory is short, the song's status says "Waiting for free memory (N MB more needed)…" and the work continues as soon as memory frees up.
+- **Nothing is lost on a crash:** if the separation process dies (for example, the system ends it when memory runs out), the window starts it again and every song continues from its last checkpoint. A cancelled song also continues where it stopped when it is split again.
+- **Settings remembered between sessions:** output folder, quality (saved by preset name), format, Instrumental, Guitar/Piano, the memory reserve and the last input folder.
 - **Theme:** Fusion style with an accent color; on macOS it follows the system dark mode.
 - **Help → About** menu with the versions and the models in use.
 
@@ -80,16 +84,17 @@ The old name `high` is still accepted, as an alias of `balanced`.
 
 ```bash
 python main.py --cli song1.mp3 song2.flac -o output_folder \
-    -q balanced|maximum|fast  -b 320  --wav  --instrumental  --guitar-piano
+    -q balanced|maximum|fast  -b 320  --wav  --instrumental  --guitar-piano  --reserve-mb 2048
 ```
 
-It prints the device, the progress and where each stem was written. With several songs, one song is written while the next one is separated (see [section 4.3](#43-optimizations-in-place)).
+`--reserve-mb` is the memory the system must keep free (default: automatic). It prints the device, the progress and where each stem was written. With several songs, one song is written while the next one is separated (see [section 4.3](#43-optimizations-in-place)).
 
 ### 2.5 Models and user data
 
 - **The models download themselves on first use,** with visible progress: ~0.7 GB for SW, plus ~0.9 GB for MelBand, only if *Maximum* is used.
 - **Where they live:** `%LOCALAPPDATA%\StemSplitter\models` on Windows and `~/Library/Application Support/StemSplitter/models` on macOS.
-- **In the same data folder:** `stemsplitter.log` (output of the builds without a console), `selftest.txt` (self-test result), `numba_cache` (librosa's cache) and `bin/` (a copy of ffmpeg when the app runs from source).
+- **In the same data folder:** `stemsplitter.log` (output of the builds without a console), `selftest.txt` (self-test result), `numba_cache` (librosa's cache), `bin/` (a copy of ffmpeg when the app runs from source) and `work/`, one folder per song being split (its audio and checkpoint; removed as soon as the song's files are written, and after 7 days if the song is never split again).
+- **Disk space while splitting:** about 21 MB per minute of song per track in `work/`, up to ~14 tracks for 6 stems + Instrumental in *Maximum*, so roughly 0.3 GB per minute of song at most (~1.2 GB for a 4-minute song). The app checks the free space after decoding.
 
 ### 2.6 Hardware selection
 
@@ -97,6 +102,7 @@ It prints the device, the progress and where each stem was written. With several
 - **Apple Silicon (Metal/MPS):** used automatically on the Mac. Rare operations without MPS support fall back to the CPU (`PYTORCH_ENABLE_MPS_FALLBACK=1`).
 - **CPU:** used only when there is no compatible GPU.
 - **`STEMSPLITTER_THREADS=N`:** pins the number of CPU threads, for testing.
+- **`STEMSPLITTER_MEM_RESERVE_MB=N`:** sets the memory reserve (overrides the automatic one; the window's setting overrides this).
 - **`STEMSPLITTER_MEMLOG=1`:** logs the RAM (and the VRAM, once PyTorch is loaded) at every stage: worker started, audio decoded, model loaded, inference done, stems assembled, files written, queue finished and worker stopped.
 
 ---
@@ -170,7 +176,7 @@ Laptop with an Intel i5-12500H and an NVIDIA RTX 3050 Laptop (4 GB). 4-minute so
 
 Measured directly: a 5:20 song in Balanced takes **77 s** with the model already loaded, and a batch of 2 songs takes **156 s**. Loading the model costs ~3 s and, since the preloading, usually happens before *Split stems* is pressed. Apple Silicon timings have not been measured yet.
 
-The *Maximum* time was measured before it started keeping only one model at a time in VRAM ([section 4.5](#45-scalability-and-memory-use)) and should now be lower. On a 60 s clip it now takes ~1.5× the Balanced time, but a full song still has to be measured.
+The *Maximum* time was measured before it started keeping only one model at a time in VRAM ([section 4.5](#45-scalability-and-memory-use)) and should now be lower. On a 60 s clip it now takes ~1.5× the Balanced time, but a full song still has to be measured. Since the streaming engine ([4.6](#46-memory-governor)) a 2:52 song in Balanced took 51.8 s, against 66.1 s with the previous engine, measured back to back on the same laptop; these timings were not re-measured for a 4-minute song.
 
 ### 4.2 Where the time goes (profiling)
 
@@ -209,8 +215,12 @@ In chronological order, with the measured gain:
 | 13 | **Fewer array copies** and encoding without `tobytes()` | split peak: 3.81 → 3.46 GB |
 | 14 | **One model at a time in VRAM** in *Maximum* (CUDA) | 60 s clip on a 4 GB GPU: ~860 s → ~23 s |
 | 15 | **Worker preloading** when songs are added | ~6 s less waiting per queue |
+| 16 | **Streaming inference:** each sample is finished and written to a file as soon as no later chunk covers it | memory no longer grows with the song's length |
+| 17 | **Work files with plain file I/O** instead of arrays or memory maps | the audio sits in the OS file cache, which the OS gives back first |
+| 18 | **Memory governor:** budget = used + available − reserve, recomputed every 250 ms | never eats into the memory the system needs ([4.6](#46-memory-governor)) |
+| 19 | **Checkpoints** per song and **automatic restart** of a crashed worker | no work lost on a crash, a cancel or a lack of memory |
 
-The details and measurements of items 11 to 15 are in [section 4.5](#45-scalability-and-memory-use). All of them keep the output bit-identical.
+The details and measurements of items 11 to 15 are in [section 4.5](#45-scalability-and-memory-use) and those of 16 to 19 in [section 4.6](#46-memory-governor). All of them keep the output bit-identical.
 
 ### 4.4 Tried and dropped
 
@@ -233,14 +243,14 @@ All measured on the RTX 3050:
 ### 4.5 Scalability and memory use
 
 - **One GPU, one job at a time.** Two simultaneous inferences on a 4 GB GPU fight over the VRAM, Windows starts using system RAM and everything becomes **several times slower**. This was seen with a second copy of the app open: up to 8× slower.
-- **Bounded pipelining:** at most one song waits to be written, so RAM never holds more than two songs' worth of stems. A 5-minute song with the mix and 4 stems in float32 takes ~0.5 GB; the measured process peak was ~3.1 GiB, including PyTorch and the model.
+- **Bounded pipelining:** at most one song waits to be written, and only while the memory governor's headroom is relaxed ([4.6](#46-memory-governor)); otherwise songs go one at a time. The stems themselves are in files, not in RAM.
 - **The AI runs in a separate process (worker).** The window doesn't import PyTorch and uses ~50 MB. The worker is created as soon as songs are added and loads the preset's model in the background (only if the model is already downloaded; it waits up to 90 s for *Split stems*), which takes ~6 s off the wait. It loads the model once for the whole queue and quits 30 s after the queue is done (`EngineProcess.IDLE_SECONDS`). Only ending the process reliably gives the memory of PyTorch, CUDA and the C libraries back to the system: in the same process, ~2.1 GB stayed resident even after `engine.close()`.
 - **One instance per model.** The overlap is just an attribute read on every `demix()`, so Balanced and Fast share the same BS-RoFormer. Leaving Maximum unloads MelBand-RoFormer. Before, switching between presets left up to 3 instances loaded.
 - **One model at a time in VRAM (CUDA).** In Maximum, the idle model waits in RAM while the other one runs (`_place_on_gpu`); the swap takes a fraction of a second. With both on the 4 GB GPU, the VRAM reservation reached 4.3 GB, Windows started using system RAM and a 60 s clip took ~860 s. It now takes ~23 s, with 1.8 GB reserved and bit-identical output. On Apple Silicon the memory is shared, so nothing changes there.
 - **On the CPU,** inference dominates even more: ~3.3× real time per pass.
-- **Fewer array copies:** only the stems in use are copied out of the model's output (the model's own "other" and, without the option, guitar and piano are dropped); the Maximum average, the gain for loud songs and Other are computed in place; ffmpeg receives the stem's own buffer, without `tobytes()`. The output is still bit-identical.
+- **Fewer copies:** only the stems in use are written out of the model's output (the model's own "other" and, without the option, guitar and piano are dropped); the Maximum average, the gain for loud songs and Other are computed in place on 10 s blocks; ffmpeg receives each block's own buffer, without `tobytes()`. The output is still bit-identical.
 
-Measured (RTX 3050 Laptop, 5:21 song, Balanced, WAV + Instrumental):
+Measured when the worker process was introduced (`f275d9b`, before the streaming engine of [4.6](#46-memory-governor); RTX 3050 Laptop, 5:21 song, Balanced, WAV + Instrumental):
 
 | | Before | After |
 |---|---|---|
@@ -248,6 +258,48 @@ Measured (RTX 3050 Laptop, 5:21 song, Balanced, WAV + Instrumental):
 | Split RAM peak | 3.81 GB | 3.46 GB |
 | RAM after the queue | ~2.1 GB (held until the app closed) | ~60 MB (the worker quits 30 s later) |
 | Balanced → Fast → Maximum → Balanced in the same engine | 3 instances, 2.30 GB | 1 instance, 1.67 GB |
+
+### 4.6 Memory governor
+
+The goal: the app never takes the memory the system needs to stay responsive, uses what is free to go fast, and never loses work when memory runs short. Three parts make this possible.
+
+**1. Streaming engine (`engine.py`).** The library's `demix()` held the whole song and every stem in memory (the overlap-add sum and counter buffers), so memory grew with the song's length. The engine now runs the same loop itself: same chunk schedule, Hamming window, overlap-add, counter and division, in the same order, so the output is **bit-identical**. The difference is that every sample is divided out and written to the song's work folder as soon as no later chunk covers it. The decoded mix, the models' outputs and the final stems are raw float32 files (`_Track`), read and written block by block (10 s). Plain file I/O on purpose: a memory map's pages count against the process (on Windows they leave "available" memory altogether), which made the governor wait for memory the app itself was holding; the file cache is counted as available by every OS and dropped first. Assembling the stems (vocal average, gain, `Other = mix − rest`, Instrumental) and encoding also run block by block.
+
+**2. The governor (`memgov.py`).** A thread samples the memory every 250 ms:
+
+> **budget = what the app uses now + memory the system has available − reserve**
+> **headroom = budget − what the app uses now = available − reserve**
+
+- **Reserve:** what the system must keep free. Automatic: 2 GB, or a quarter of the RAM on machines with less than 8 GB. The user can pick 1–8 GB in the window (`--reserve-mb` in the CLI). Examples: 5 GB available and a 2 GB reserve → the app may take 3 GB more; 3 GB available → 1 GB.
+- **macOS:** the kernel's memory pressure level (`kern.memorystatus_vm_pressure_level`) also counts: "warning" limits the headroom to below 512 MB and "critical" makes it negative, because macOS compresses memory before "available" drops.
+- **Before every step that needs memory** (loading a model, each inference chunk, each encoder) the engine calls `wait(need)`. The cost of a chunk is measured on the machine as it runs (how far available memory dropped during the previous chunk), and the cost of loading a model is measured the first time it loads (0.70 GB model: ~0.76 GB; 0.91 GB model: ~0.74–0.97 GB).
+- **What it changes, by headroom:**
+
+| Headroom | Level | What happens |
+|---|---|---|
+| ≥ 2 GB | relaxed | Everything in parallel: writing a song while the next one is separated, one encoder per stem, both *Maximum* models kept loaded |
+| ≥ 512 MB | normal | One song at a time, at most 2 encoders |
+| > 0 | tight | 1 encoder, GPU/allocator caches emptied after each chunk, the model not in use is unloaded (reloaded when needed) |
+| ≤ 0 | over | Frees what it can, then **waits** before the next step, keeping all the work done, until other programs free memory |
+
+- **Apple GPU:** PyTorch is capped (`torch.mps.set_per_process_memory_fraction`) at what the budget allows, so it raises an out-of-memory error instead of pushing macOS into swap. A chunk that runs out of memory (on any device) is retried after freeing caches and waiting, up to 12 times with growing waits; nothing of that chunk was added yet, so the result is unchanged.
+- **Preloading** a model when songs are added only happens if it fits the budget; it never waits.
+
+**3. Checkpoints and restart.** Each song has a work folder (`work/<key>/`, the key covers the file, its size and date, and the options that change the stems) with a `state.json`. The model passes save their position and overlap buffers every 15 s; decoding, each model pass, the assembly and each written file are recorded as they finish. A song that is split again (after a cancel, a crash, or a reboot) continues from there. If the worker process dies in the middle of a queue, the window restarts it (up to 3 times per queue) with the songs that were left. Measured: a split killed (`kill -9`) at 0:51 of a 2:52 song resumed at 0:51 and its files were bit-identical to an uninterrupted run; in the window, a worker killed at 56% was restarted and the song finished.
+
+**Measured** (RTX 3050 Laptop, 24 GB of RAM with ~3–5 GB available because of other programs, the same script for both engines, files compared byte for byte):
+
+| Case | Previous engine | Streaming engine + governor | Output |
+|---|---|---|---|
+| 2:52 song, Balanced, WAV + Instrumental | 66.1 s, RSS peak 2,342 MB | 51.8 s, 1,768 MB | identical |
+| 60 s loud clip (peak 1.5), Maximum, 6 stems, MP3 | 45.6 s, 2,696 MB | 32.6 s, 2,649 MB | identical |
+| 6 s clip (short-audio path), Fast | 3.7 s, 1,660 MB | 2.5 s, 1,944 MB | identical |
+| 60 s clip, Fast, 6 stems + Instrumental, MP3 | 9.7 s, 1,687 MB | 9.0 s, 1,708 MB | identical |
+| CPU only (CUDA hidden), 6 s clip, Fast | — | — | identical |
+
+With memory to spare, *Maximum* still peaks about as high as before: with a relaxed headroom it keeps the stem model in RAM while the vocal model loads, to save reloading it. That is the intended trade-off (use free memory to go fast). The peaks of the short clips include what the process kept from the case before; they are within the budget either way. With memory short (2.3–3.4 GB available, 2 GB reserve), the same *Maximum* run unloaded the stem model before loading the vocal model, waited 10–20 s for memory twice and finished, with the RSS between 1.2 and 1.6 GB.
+
+**The floor.** PyTorch, one model and one chunk must fit at the same time. On the CUDA build that measured ~1.2–1.5 GB of RAM (the model itself in VRAM); on Apple Silicon it has not been measured. Below the floor the app cannot make progress: it waits, says so in the status, and continues when memory frees up, instead of stalling the computer or losing work.
 
 ---
 
@@ -261,6 +313,7 @@ Measured (RTX 3050 Laptop, 5:21 song, Balanced, WAV + Instrumental):
 | `stemsplitter/engine.py` | The whole audio pipeline: presets, models, decoding, separation, stem assembly and writing |
 | `stemsplitter/gui.py` | PySide6 interface: window, queue, settings and the `EngineProcess`, which starts and stops the worker |
 | `stemsplitter/worker.py` | Worker process: runs the queue on the engine and sends progress, logs and results to the GUI |
+| `stemsplitter/memgov.py` | The memory governor: budget, levels, waiting, macOS memory pressure ([4.6](#46-memory-governor)) |
 | `stemsplitter/memory.py` | Memory measurement for debugging (`STEMSPLITTER_MEMLOG=1`) |
 | `stemsplitter/platform_utils.py` | Data folders, bundled ffmpeg, packaged-app tweaks, opening folders |
 | `stemsplitter/__init__.py` | App name and version |
@@ -292,22 +345,25 @@ The stages in `engine.py`:
 
 1. **`_decode`:** ffmpeg turns any format into 44.1 kHz stereo float32 and pipes it straight into a NumPy array, with no temporary file.
 2. **Gain:** if the peak is above 1.0, the model input is multiplied by `1/peak`.
-3. **`_run_model`:** calls the `audio-separator` model's `demix()` directly with the array (`channels × samples`), skipping the library's file-based path.
-4. **Assembly:** undoes the gain; Vocals (the average of the two models in Maximum), Drums, Bass and, if requested, Guitar and Piano; Other = mix − sum; optional Instrumental.
-5. **`write_stems`:** a thread *pool* encodes all the stems at once, with ffmpeg reading the audio from stdin.
+3. **`_stream_model`:** runs the `audio-separator` model chunk by chunk with the library's own demix loop, writing every finished sample to the song's work folder ([4.6](#46-memory-governor)).
+4. **`_assemble`:** block by block, undoes the gain; Vocals (the average of the two models in Maximum), Drums, Bass and, if requested, Guitar and Piano; Other = mix − sum; optional Instrumental; and each stem's peak for the clipping protection.
+5. **`write_stems`:** encodes the stems in parallel (as many at once as the governor allows), streaming each one to ffmpeg's stdin block by block; each file is written under a `.part` name and renamed when complete.
+
+`_decode`, `_stream_model`, `_assemble` and `write_stems` all read and write the work folder through `_Track` (10 s blocks), so a song never has to fit in memory.
 
 ### 5.3 Engine API
 
 ```python
 from stemsplitter.engine import StemEngine, Options
 
-engine = StemEngine(log=print)            # keeps the loaded models between songs
+engine = StemEngine(log=print)            # keeps the loaded models between songs; starts its own memory governor
 opts = Options(output_dir="output", quality="balanced", bitrate_kbps=320,
-               output_format="mp3", also_instrumental=False, guitar_piano=False)
+               output_format="mp3", also_instrumental=False, guitar_piano=False,
+               memory_reserve_mb=0)       # 0 = automatic reserve
 
 result = engine.separate("song.mp3", opts, progress=lambda frac, text: ...)
 # or, to overlap writing and separation:
-sep = engine.split("song.mp3", opts, progress)         # -> Separated (stems in memory)
+sep = engine.split("song.mp3", opts, progress)         # -> Separated (stems as files in the work folder)
 result = engine.write_stems(sep, opts, progress)       # -> Result (paths + seconds)
 
 engine.prepare_models(progress, quality="maximum")     # download/load ahead of time (optional)
@@ -317,6 +373,8 @@ engine.close()
 - `Preset(stem_overlap, vocal_overlap)` defines each preset; `get_preset()` resolves names and aliases.
 - `progress(frac, text)` receives the overall progress from 0 to 1; `cancel` is any object with `is_set()` (`threading.Event` or `multiprocessing.Event`).
 - `Cancelled` is the exception raised when the user cancels.
+- `StemEngine(governor=...)` shares a `MemoryGovernor` (the worker does this); `engine.gov` is the governor in use.
+- `Separated.stems` holds `_Track`s (slice them, `track[i:j]`, or `np.asarray(track)` for the whole stem); `write_stems()` closes them and removes the work folder.
 
 ### 5.4 Processes and threads
 
@@ -325,10 +383,11 @@ engine.close()
 | GUI process, main thread (Qt) | Window and events; the `EngineProcess` reads the worker's event queue every 50 ms and forwards the events as signals |
 | Worker process, main thread (`worker.serve`) | `engine.split()` for each song (decoding and inference on the GPU/CPU) |
 | Worker process, *writer* (1 thread) | `engine.write_stems()` for the previous song and its done event |
-| Worker process, encoder *pool* (up to N threads) | One ffmpeg/LAME process per stem |
+| Worker process, encoder *pool* (up to N threads) | One ffmpeg/LAME process per stem, as many at once as the governor allows |
+| Worker process, *memory governor* (1 thread) | Samples the memory every 250 ms and sends a `memory` event about once a second while busy |
 
-- **Communication:** two `multiprocessing.Queue`s (*spawn* context). The worker receives the commands `("prepare", quality)` (preload), `("run", jobs, opts)` (process the queue) and `None` (quit). It sends back the events `status`, `done`, `failed`, `log`, `device`, `prepared` and `finished`, delivered in the order they were emitted. Consecutive progress updates for the same song are coalesced.
-- **Lifecycle:** the worker is created when songs are added and loads the preset's model right away (`prepare`, only if the model is already downloaded). It waits up to 90 s for *Split stems* (`PREWARM_IDLE_SECONDS`), is reused by any queue started within 30 s after a queue ends (`IDLE_SECONDS`), and quits after that or when the window closes. If the process dies midway (out of memory, driver failure), the remaining songs show as failed and the window keeps working.
+- **Communication:** two `multiprocessing.Queue`s (*spawn* context). The worker receives the commands `("prepare", quality, reserve_mb)` (preload), `("run", jobs, opts)` (process the queue) and `None` (quit). It sends back the events `status`, `done`, `failed`, `log`, `device`, `memory`, `prepared` and `finished`, delivered in the order they were emitted. Consecutive progress updates for the same song are coalesced.
+- **Lifecycle:** the worker is created when songs are added and loads the preset's model right away (`prepare`, only if the model is already downloaded). It waits up to 90 s for *Split stems* (`PREWARM_IDLE_SECONDS`), is reused by any queue started within 30 s after a queue ends (`IDLE_SECONDS`), and quits after that or when the window closes. If the process dies midway (for example, ended by the OS when memory runs out), the window starts it again with the songs that were left, each continuing from its checkpoint (`MAX_RESTARTS` = 3 per queue); after that, the remaining songs show as failed and the window keeps working.
 - **Cancellation:** a shared `multiprocessing.Event`, checked between inference blocks (through the progress hook) and before each file is written.
 - **Packaged:** the worker is the executable itself, started through `multiprocessing.freeze_support()` in `main.py`. The CI `--selftest` starts and stops a worker to make sure this works.
 - **Careful when touching the spawn:** the queues and the `Event` must stay referenced in the parent process (for example, on `self`). `Process.start()` drops its own arguments, and on macOS/Linux a collected `Event` deletes its semaphore before the worker can open it (`FileNotFoundError`). On Windows the error doesn't show up, because the handles are duplicated into the child. This is what broke the Mac self-test from `f275d9b` to `a1ea3c3`.
@@ -352,7 +411,7 @@ The handler on the `audio_separator` logger only forwards warnings and useful me
 ### 6.1 Requirements
 
 - **Python:** 3.11 recommended.
-- **Dependencies (`requirements.txt`):** `audio-separator[cpu]==0.47.0`, `torch>=2.3`, `PySide6==6.11.2`, `imageio-ffmpeg==0.6.0`, `soundfile`, `numpy`.
+- **Dependencies (`requirements.txt`):** `audio-separator[cpu]==0.47.0`, `torch>=2.3`, `PySide6==6.11.2`, `imageio-ffmpeg==0.6.0`, `soundfile`, `psutil`, `numpy`.
 - **Windows:** 64-bit. For the GPU, an NVIDIA card with a driver compatible with CUDA 13.0.
 - **macOS:** 14 (Sonoma) or newer, on Apple Silicon. Intel Macs are not supported because PyTorch no longer publishes builds for them.
 
@@ -380,7 +439,7 @@ The stages:
    - `Windows-x64`: PyTorch **CUDA 13.0**; uses the NVIDIA GPU and falls back to the CPU without one.
    - `macOS-AppleSilicon`: default PyTorch, with Metal.
    - `Windows-x64-CPU` (optional): smaller, CPU only. It only builds on a manual run with the option ticked; in other runs its steps are skipped and the job shows as passed **without having built anything**.
-3. **Self-test of the packaged app:** `StemSplitter --selftest` imports PyTorch and `audio-separator`, runs ffmpeg, starts and stops a worker process and writes `selftest.txt`, which includes the CUDA version. On the Mac the app is also signed ad hoc and, if the self-test fails, the error (`selftest.txt`, the app's output and `stemsplitter.log`) is published as a GitHub Actions **annotation**, which can be read without signing in (the job log requires signing in).
+3. **Self-test of the packaged app:** `StemSplitter --selftest` imports PyTorch and `audio-separator`, runs ffmpeg, starts and stops a worker process, checks that the memory governor can read the memory figures (`psutil` bundled) and writes `selftest.txt`, which includes the CUDA version. On the Mac the app is also signed ad hoc and, if the self-test fails, the error (`selftest.txt`, the app's output and `stemsplitter.log`) is published as a GitHub Actions **annotation**, which can be read without signing in (the job log requires signing in).
 4. **Downloadable files:** one zip per platform (manual runs and tags only).
 5. **Release:** the CUDA Windows build is larger than 2 GB, the GitHub Releases limit, so it ships as 7-Zip parts `.7z.001`, `.002`, …
 
@@ -439,7 +498,9 @@ For speed, the log already has the time of every stage. For fine measurements, s
 - **The CPU is slow:** ~20–28 min per 4-minute song. A GPU changes everything.
 - **4 GB of VRAM:** other programs using the GPU, including another copy of StemSplitter, can make the separation several times slower. In *Maximum*, only the model in use is kept on the GPU.
 - **First pass of the vocal model:** in some tests, in a new session, it took ~45 s longer than the following ones. The cause was not confirmed and it didn't happen in every measurement. It was probably the same *Maximum* VRAM overflow fixed in `5a51768`, but that has not been verified yet.
-- **Apple Silicon:** works, but the timings have not been measured yet.
+- **Memory floor:** PyTorch, one model and one chunk must fit at the same time (~1.2–1.5 GB of RAM measured on the CUDA build; not measured on Apple Silicon). Below that the app waits for memory instead of running ([4.6](#46-memory-governor)).
+- **Apple Silicon:** works, but the timings have not been measured yet. The memory governor's macOS parts (memory pressure level, the Apple GPU cap) are only covered by the CI build and self-test, not by a run on a Mac.
+- **Disk space:** a song being split needs up to ~0.3 GB per minute in the data folder until its files are written.
 - **Unsigned apps:** public distribution would need an Apple Developer ID (with notarization) and a Windows code-signing certificate.
 - **Licenses:** the code belongs to the project. Components: python-audio-separator (MIT), PyTorch (BSD), PySide6/Qt (LGPL-3, dynamically linked), FFmpeg (GPL; include the license and a link to its source code if you distribute it) and the models (check each one's license before any commercial use).
 
@@ -460,4 +521,5 @@ For speed, the log already has the time of every stage. For fine measurements, s
 | `5a51768` (PR #3) | One model at a time in VRAM in *Maximum* (60 s clip: ~860 s → ~23 s on a 4 GB GPU); worker preloading when songs are added |
 | `a1ea3c3` | CI: a failed macOS self-test is published as an annotation |
 | `65e678d` | macOS self-test fix: the worker's `Event` was collected before the process could open it |
-| — | Documentation brought up to date and translated to English (`docs/DOCUMENTACAO.md` → `docs/DOCUMENTATION.md`); `CLAUDE.md` with the English-only and documentation rules |
+| `d39b305` | Documentation brought up to date and translated to English (`docs/DOCUMENTACAO.md` → `docs/DOCUMENTATION.md`); `CLAUDE.md` with the English-only and documentation rules |
+| — | Memory governor: streaming inference and file-backed work tracks (bit-identical output, memory no longer grows with the song), budget = used + available − reserve with a user setting, waiting instead of failing, checkpoints per song and automatic restart of a crashed worker |

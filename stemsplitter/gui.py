@@ -43,6 +43,15 @@ FORMATS = [
     ("MP3 · 192 kbps", "mp3", 192),
     ("WAV · 24-bit (lossless)", "wav", 0),
 ]
+RESERVES = [  # memory the system keeps free (see memgov.py); 0 = automatic
+    ("Automatic (recommended)", 0),
+    ("1 GB", 1024),
+    ("2 GB", 2048),
+    ("3 GB", 3072),
+    ("4 GB", 4096),
+    ("6 GB", 6144),
+    ("8 GB", 8192),
+]
 QUALITIES = [
     ("Balanced (recommended)", "balanced"),
     ("Maximum (cleanest vocals, about 1.8× slower)", "maximum"),
@@ -65,11 +74,16 @@ class EngineProcess(QObject):
     so a song added right away reuses the loaded models; then it exits and its RAM goes back to
     the OS. It is also started (prewarm) as soon as songs are added, so PyTorch and the model
     are usually loaded by the time Split is pressed.
+
+    If the worker dies in the middle of a batch (for example, the OS ends it when memory runs
+    out), it is started again and continues with the songs that were left, each one from its
+    last checkpoint, so no finished work is lost.
     """
 
     IDLE_SECONDS = 30
     PREWARM_IDLE_SECONDS = 90  # time to pick the options after adding songs
     POLL_MS = 50
+    MAX_RESTARTS = 3  # per batch
 
     status = Signal(int, float, str)  # row, fraction, text
     file_done = Signal(int, dict, float)  # row, {stem: path}, seconds
@@ -77,6 +91,7 @@ class EngineProcess(QObject):
     log = Signal(str)
     device = Signal(str)
     finished = Signal(bool)  # cancelled?
+    memory = Signal(dict)  # the memory governor's snapshot, about once a second while busy
     stopped = Signal()  # the worker process exited (its memory is released)
 
     def __init__(self, parent=None):
@@ -85,6 +100,9 @@ class EngineProcess(QObject):
         self._proc = None
         self._commands = self._events = self._cancel = None
         self._pending: list[int] = []  # rows of the running batch not yet reported done/failed
+        self._jobs: list[tuple[int, Path]] = []
+        self._opts = None
+        self._restarts = 0
         self.busy = False
         self._poll = QTimer(self)
         self._poll.setInterval(self.POLL_MS)
@@ -100,12 +118,13 @@ class EngineProcess(QObject):
         if self._proc is None:
             self._spawn()
         self._cancel.clear()
+        self._jobs, self._opts, self._restarts = list(jobs), opts, 0
         self._pending = [row for row, _ in jobs]
         self.busy = True
         self._commands.put(("run", jobs, opts))
         self._poll.start()
 
-    def prewarm(self, quality: str) -> None:
+    def prewarm(self, quality: str, reserve_mb: int = 0) -> None:
         """Start the worker and load the preset's models in the background (no-op while busy)."""
         if self.busy:
             return
@@ -113,7 +132,7 @@ class EngineProcess(QObject):
             self._cleanup()
         if self._proc is None:
             self._spawn()
-        self._commands.put(("prepare", quality))
+        self._commands.put(("prepare", quality, reserve_mb))
         self._idle.start(max(self._idle.remainingTime(), self.PREWARM_IDLE_SECONDS * 1000))
         self._poll.start()
 
@@ -126,7 +145,7 @@ class EngineProcess(QObject):
 
         # Held on self on purpose: Process.start() drops its args, and on macOS/Linux a collected Event
         # unlinks its named semaphore before the worker can open it.
-        self._commands, self._events, self._cancel =self._ctx.Queue(), self._ctx.Queue(), self._ctx.Event()
+        self._commands, self._events, self._cancel = self._ctx.Queue(), self._ctx.Queue(), self._ctx.Event()
         self._proc = self._ctx.Process(target=serve, args=(self._commands, self._events, self._cancel),
                                        name="StemSplitter worker", daemon=True)
         self._proc.start()
@@ -155,13 +174,29 @@ class EngineProcess(QObject):
                 self.log.emit(msg[1])
             elif kind == "device":
                 self.device.emit(msg[1])
+            elif kind == "memory":
+                self.memory.emit(msg[1])
             elif kind == "prepared" and not self.busy:
                 self._poll.stop()
             elif kind == "finished":
                 self._finish(msg[1])
                 return
-        if self.busy and not self._proc.is_alive():  # crashed (e.g. out of memory): fail what is left
+        if self.busy and not self._proc.is_alive():  # crashed (e.g. ended by the OS when out of memory)
             code = self._proc.exitcode
+            if self._pending and self._restarts < self.MAX_RESTARTS:
+                # start again with the songs that are left; each continues from its checkpoint
+                self._restarts += 1
+                left = [(row, path) for row, path in self._jobs if row in self._pending]
+                cancel_requested = self._cancel.is_set()
+                self.log.emit(f"The separation process stopped (exit code {code}); restarting it and "
+                              f"continuing where it left off ({self._restarts}/{self.MAX_RESTARTS})")
+                self._cleanup()
+                self._spawn()
+                if cancel_requested:
+                    self._cancel.set()
+                self.busy = True
+                self._commands.put(("run", left, self._opts))
+                return
             for row in list(self._pending):
                 self._report(row)
                 self.file_failed.emit(row, f"The separation process stopped unexpectedly (exit code {code})")
@@ -268,8 +303,9 @@ class MainWindow(QMainWindow):
         self.engine.file_failed.connect(self._on_failed)
         self.engine.log.connect(self._append_log)
         self.engine.device.connect(self._on_device)
+        self.engine.memory.connect(self._on_memory)
         self.engine.finished.connect(self._on_finished)
-        self.engine.stopped.connect(lambda: memlog("worker process stopped (GUI process)", self._append_log))
+        self.engine.stopped.connect(self._on_worker_stopped)
         self._build_ui()
         self._load_settings()
         memlog("window created (GUI process)", self._append_log)
@@ -337,6 +373,14 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.chk_inst, 3, 1, 1, 2)
         self.chk_gp = QCheckBox("Also split Guitar and Piano out of Other (6 stems)")
         grid.addWidget(self.chk_gp, 4, 1, 1, 2)
+
+        grid.addWidget(QLabel("Keep free for the system"), 5, 0)
+        self.reserve = QComboBox()
+        for label, mb in RESERVES:
+            self.reserve.addItem(label, mb)
+        self.reserve.setToolTip("StemSplitter never uses this much of the free memory, so the computer stays "
+                                "responsive. When memory runs short it slows down or waits, and never loses work.")
+        grid.addWidget(self.reserve, 5, 1, 1, 2)
         grid.setColumnStretch(1, 1)
         lay.addWidget(card)
 
@@ -354,6 +398,9 @@ class MainWindow(QMainWindow):
         self.device_label = QLabel("")
         self.device_label.setObjectName("device")
         row.addWidget(self.device_label, 1)
+        self.memory_label = QLabel("")
+        self.memory_label.setObjectName("device")
+        row.addWidget(self.memory_label)
         self.btn_log = QPushButton("Show log")
         self.btn_log.setCheckable(True)
         self.btn_log.toggled.connect(
@@ -395,6 +442,7 @@ class MainWindow(QMainWindow):
         self.fmt.setCurrentIndex(int(self.settings.value("format_idx", 0)))
         self.chk_inst.setChecked(self.settings.value("instrumental", "false") == "true")
         self.chk_gp.setChecked(self.settings.value("guitar_piano", "false") == "true")
+        self.reserve.setCurrentIndex(max(0, self.reserve.findData(int(self.settings.value("memory_reserve_mb", 0)))))
 
     def _save_settings(self):
         self.settings.setValue("output_dir", self.out_edit.text())
@@ -402,6 +450,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("format_idx", self.fmt.currentIndex())
         self.settings.setValue("instrumental", "true" if self.chk_inst.isChecked() else "false")
         self.settings.setValue("guitar_piano", "true" if self.chk_gp.isChecked() else "false")
+        self.settings.setValue("memory_reserve_mb", self.reserve.currentData())
 
     # -- file list ----------------------------------------------------------------------
     def add_files(self, paths):
@@ -418,7 +467,7 @@ class MainWindow(QMainWindow):
             existing.add(p)
         self.list.viewport().update()
         if self.list.count():
-            self.engine.prewarm(self.quality.currentData())
+            self.engine.prewarm(self.quality.currentData(), self.reserve.currentData())
 
     def _pick_files(self):
         start = self.settings.value("last_input_dir", str(Path.home()))
@@ -487,6 +536,7 @@ class MainWindow(QMainWindow):
             also_instrumental=self.chk_inst.isChecked(),
             guitar_piano=self.chk_gp.isChecked(),
             output_format=fmt,
+            memory_reserve_mb=self.reserve.currentData(),
         )
 
         for row, _ in jobs:
@@ -504,7 +554,7 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(not running)
         self.btn_cancel.setEnabled(running)
         for w in (self.btn_add, self.btn_remove, self.btn_clear, self.quality, self.fmt, self.chk_inst, self.chk_gp,
-                  self.out_edit):
+                  self.out_edit, self.reserve):
             w.setEnabled(not running)
 
     def _set_item(self, row: int, state: str, icon: str, extra: str = ""):
@@ -526,6 +576,18 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_device(self, device: str):
         self.device_label.setText(f"Processing on: {device}")
+
+    @Slot(dict)
+    def _on_memory(self, snap: dict):
+        gb = 1024**3
+        text = f"Memory: {snap['used'] / gb:.1f} GB · limit {snap['budget'] / gb:.1f} GB"
+        if snap.get("waiting"):
+            text += " · waiting for free memory"
+        self.memory_label.setText(text)
+
+    def _on_worker_stopped(self):
+        self.memory_label.setText("")
+        memlog("worker process stopped (GUI process)", self._append_log)
 
     @Slot(int, dict, float)
     def _on_done(self, row: int, stems: dict, seconds: float):

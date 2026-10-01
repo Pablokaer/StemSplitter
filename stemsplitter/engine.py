@@ -1,6 +1,6 @@
 """Separation engine.
 
-Pipeline (everything stays in memory; no intermediate files):
+Pipeline (streamed through files in the song's work folder, see _Work and _Track):
   1. ffmpeg decodes the input (MP3, WAV, FLAC, M4A...) to 44.1 kHz stereo float32 via a pipe.
   2. BS-RoFormer SW (jarredou) splits the mix in one pass into vocals, drums, bass,
      guitar, piano and other.
@@ -10,6 +10,13 @@ Pipeline (everything stays in memory; no intermediate files):
      the original song exactly. Then all stems are encoded to MP3 (320 kbps by default) in
      parallel. split() and write_stems() are separate so a batch can encode one song while
      the next one is on the GPU.
+
+Memory: the models run chunk by chunk and every finished sample goes straight to a file, so a
+song never has to fit in RAM (the output is bit-identical to doing it all in memory). Every
+step asks the memory governor (memgov.py) first, which keeps the app below what the system
+needs to stay responsive: it frees caches, unloads idle models, runs fewer things in parallel
+and, as a last resort, waits for memory without losing any work. A checkpoint per song lets an
+interrupted split continue where it stopped.
 
 Profiled on an RTX 3050 Laptop, the model forward pass is most of the time and the GPU is
 saturated by it: batching chunks, cudnn.benchmark, TF32 and torch.compile (broken on
@@ -31,6 +38,8 @@ from __future__ import annotations
 
 import atexit
 import gc
+import hashlib
+import json
 import logging
 import os
 
@@ -44,10 +53,11 @@ os.environ.setdefault("NUMBA_CACHE_DIR", str(app_data_dir() / "numba_cache"))
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -55,6 +65,7 @@ from typing import Callable, Optional
 import numpy as np
 import soundfile as sf
 
+from .memgov import GB, MB, MemoryGovernor, reserve_from_env
 from .memory import memlog
 from .platform_utils import find_ffmpeg, models_dir, subprocess_flags
 
@@ -64,6 +75,15 @@ SAMPLE_RATE = 44100
 
 STEM_ORDER = ["Vocals", "Drums", "Bass", "Other"]
 EXTRA_STEMS = ["Guitar", "Piano"]
+BLOCK_FRAMES = SAMPLE_RATE * 10  # 10 s: the unit for decoding, assembling and encoding (~3.5 MB per stem)
+WORK_VERSION = 1  # bump when the work-folder layout changes (old checkpoints are then ignored)
+CHECKPOINT_SECONDS = 15
+STALE_WORK_SECONDS = 7 * 24 * 3600
+CHUNK_NEED_DEFAULT = 768 * MB  # memory asked for one inference chunk until the real cost is measured
+CHUNK_NEED_MIN = 64 * MB
+ENCODER_NEED = 96 * MB  # one ffmpeg/LAME process with its pipe buffers
+OOM_RETRIES = 12  # a chunk that runs out of memory is retried this many times (with growing waits)
+
 SUPPORTED_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".aiff", ".aif", ".wma"}
 
 
@@ -104,6 +124,7 @@ class Options:
     also_instrumental: bool = False
     guitar_piano: bool = False  # also split Guitar and Piano out of Other
     output_format: str = "mp3"  # "mp3" or "wav"
+    memory_reserve_mb: int = 0  # memory the system must keep free; 0 = automatic (see memgov.py)
 
 
 @dataclass
@@ -115,13 +136,15 @@ class Result:
 
 @dataclass
 class Separated:
-    """The stems of one song, still in memory (samples x channels float32), ready to write."""
+    """The stems of one song (samples x channels float32, as arrays or files), ready to write."""
 
     input_path: Path
     stems: dict[str, np.ndarray]
     sr: int
     timings: dict[str, float]
     started: float
+    work: Optional["_Work"] = None  # the song's work folder, removed once every file is written
+    peaks: dict[str, float] = field(default_factory=dict)  # per stem, for the clipping protection
 
 
 # --------------------------------------------------------------------------------------
@@ -233,29 +256,174 @@ def _apply_thread_override() -> None:
 
 
 # --------------------------------------------------------------------------------------
+class _Track:
+    """Stereo float32 audio (frames x 2) in a raw file, read and written in blocks: track[i:j].
+
+    Plain file I/O on purpose, not a memory map: the data then sits in the OS file cache, which
+    every OS counts as available memory and gives back first, while a memory map's pages count
+    against this process's own memory (on Windows they leave "available" memory altogether),
+    which made the memory governor wait for memory the app itself was holding.
+    """
+
+    def __init__(self, path: Path, frames: int, mode: str = "r") -> None:
+        if mode == "w+":
+            with open(path, "wb") as f:
+                f.truncate(frames * 8)  # zeros (sparse where the file system allows it)
+        self._f = open(path, "rb" if mode == "r" else "r+b")
+        self._lock = threading.Lock()
+        self.frames = frames
+        self.shape = (frames, 2)
+        self.dtype = np.dtype(np.float32)
+
+    def __len__(self) -> int:
+        return self.frames
+
+    def _range(self, key: slice) -> tuple[int, int]:
+        start, stop, step = key.indices(self.frames)
+        if step != 1:
+            raise IndexError("only contiguous slices are supported")
+        return start, max(start, stop)
+
+    def __getitem__(self, key: slice) -> np.ndarray:
+        start, stop = self._range(key)
+        buf = bytearray((stop - start) * 8)
+        with self._lock:
+            self._f.seek(start * 8)
+            got = self._f.readinto(buf)
+        return np.frombuffer(buf, dtype=np.float32, count=got // 4).reshape(-1, 2)
+
+    def __setitem__(self, key: slice, value) -> None:
+        start, stop = self._range(key)
+        data = np.ascontiguousarray(value, dtype=np.float32)
+        if data.shape != (stop - start, 2):
+            raise ValueError(f"expected {(stop - start, 2)} samples, got {data.shape}")
+        with self._lock:
+            self._f.seek(start * 8)
+            self._f.write(memoryview(data).cast("B"))
+
+    def __array__(self, dtype=None, copy=None) -> np.ndarray:
+        return self[0 : self.frames]  # whole track (tests and scripts; the app never does this)
+
+    def flush(self) -> None:
+        if not self._f.closed:
+            self._f.flush()
+
+    def close(self) -> None:
+        if not self._f.closed:
+            self._f.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+class _Work:
+    """The on-disk state of one song in progress: its audio tracks plus a JSON checkpoint.
+
+    The decoded mix, the models' outputs and the final stems live in raw float32 files
+    (_Track), so a song never has to fit in RAM: while memory is plentiful the OS keeps them
+    cached and it is as fast as RAM; under pressure it simply drops them. The checkpoint lets a
+    split continue where it stopped after a crash or a cancel.
+    """
+
+    def __init__(self, root: Path, key: str) -> None:
+        self.dir = root / key
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self.state: dict = {}
+        try:
+            state = json.loads((self.dir / "state.json").read_text(encoding="utf-8"))
+            if state.get("version") == WORK_VERSION:
+                self.state = state
+        except (OSError, ValueError):
+            pass
+
+    def path(self, name: str) -> Path:
+        return self.dir / f"{name}.f32"
+
+    def array(self, name: str, frames: int, mode: str = "r") -> _Track:
+        return _Track(self.path(name), frames, mode)
+
+    def save(self, **updates) -> None:
+        with self._lock:
+            self.state.update(updates, version=WORK_VERSION)
+            tmp = self.dir / "state.json.tmp"
+            tmp.write_text(json.dumps(self.state), encoding="utf-8")
+            os.replace(tmp, self.dir / "state.json")
+
+    def drop(self, *names: str) -> None:
+        for name in names:
+            self.unlink(f"{name}.f32")
+
+    def unlink(self, filename: str) -> None:
+        """Delete a file of the work folder; never fails (what is left goes with the folder)."""
+        try:
+            (self.dir / filename).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def remove(self) -> None:
+        gc.collect()  # tracks still referenced somewhere close when collected
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def _song_key(path: Path, opts: Options) -> str:
+    st = path.stat()
+    ident = [str(path.resolve()), st.st_size, st.st_mtime_ns, get_preset(opts.quality), opts.guitar_piano,
+             opts.also_instrumental, WORK_VERSION]
+    return hashlib.sha1(repr(ident).encode()).hexdigest()[:16]
+
+
+def _is_oom(exc: BaseException) -> bool:
+    return "out of memory" in str(exc).lower() or type(exc).__name__ == "OutOfMemoryError"
+
+
+# --------------------------------------------------------------------------------------
 class StemEngine:
     """Keeps models loaded between songs so batch processing is faster.
 
-    One instance per model: the overlap is only read when demix() runs, so the presets share it.
+    One instance per model: the overlap is only read when inference runs, so the presets share
+    it. Every step that needs memory asks the memory governor first (see memgov.py).
     """
 
-    def __init__(self, log: Optional[LogFn] = None) -> None:
+    def __init__(self, log: Optional[LogFn] = None, governor: Optional[MemoryGovernor] = None) -> None:
         self.log = log or (lambda msg: None)
         self.ffmpeg = find_ffmpeg()
         self._separators: dict[str, object] = {}  # model file -> Separator
+        self._active_model: Optional[str] = None  # the model running right now (never unloaded)
         self._work_dir = Path(tempfile.mkdtemp(prefix="stemsplitter_"))
         atexit.register(shutil.rmtree, self._work_dir, True)
         self._log_handler: Optional[logging.Handler] = None
+        self._own_gov = governor is None
+        self.gov = governor or MemoryGovernor(reserve_from_env(), log=self.log)
+        if self._own_gov:
+            self.gov.start()  # samples every 250 ms, so the cost of each step can be measured
+        self.gov.add_shedder(self._shed)
+        self._songs_dir = app_data_dir() / "work"
+        self._chunk_need: dict[str, int] = {}  # learned memory cost of one inference chunk, per model
+        self._load_cost: dict[str, int] = {}  # measured memory taken while loading each model
+        self._encoded_lock = threading.Lock()
+        self._clean_stale_work()
 
     # -- helpers ------------------------------------------------------------------------
     def _run_ffmpeg(self, args: list[str], stdin=None) -> bytes:
-        """Run ffmpeg; returns its stdout (the decoded audio when the output is "-")."""
+        """Run ffmpeg; returns its stdout."""
         cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *args]
         proc = subprocess.run(cmd, input=stdin, capture_output=True, **subprocess_flags())
         if proc.returncode != 0:
-            err = proc.stderr.decode(errors="replace").strip().splitlines()
-            raise RuntimeError(f"Could not read/write audio (ffmpeg): {err[-1] if err else 'unknown error'}")
+            raise RuntimeError(_ffmpeg_error(proc.stderr))
         return proc.stdout
+
+    def _clean_stale_work(self) -> None:
+        """Songs left half-done (cancelled, crashed) are resumed when split again; drop them after a week."""
+        try:
+            for d in self._songs_dir.iterdir():
+                if d.is_dir() and time.time() - d.stat().st_mtime > STALE_WORK_SECONDS:
+                    shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass
 
     def _attach_logging(self) -> None:
         if self._log_handler is not None:
@@ -276,7 +444,19 @@ class StemEngine:
         self._log_handler = _Handler(level=logging.INFO)
         logging.getLogger("audio_separator").addHandler(self._log_handler)
 
-    def _separator(self, model: str, overlap: int, out_dir: Path):
+    def _model_need(self, model: str) -> int:
+        """Memory a model takes while it loads (the checkpoint is read in float32, then halved on a GPU)."""
+        if model in self._separators:
+            return 0
+        if model in self._load_cost:  # measured the last time it loaded
+            return max(256 * MB, int(self._load_cost[model] * 1.2))
+        try:
+            size = (models_dir() / model).stat().st_size
+        except OSError:
+            size = 1000 * MB  # not downloaded yet
+        return size + 128 * MB  # measured: the 0.70 GB stem model takes ~0.76 GB while it loads
+
+    def _separator(self, model: str, overlap: int, out_dir: Path, on_wait=None):
         """Return a Separator with `model` loaded, writing float WAVs into `out_dir`."""
         _install_progress_hooks()
         _apply_thread_override()
@@ -287,6 +467,7 @@ class StemEngine:
         sep = self._separators.get(model)
         if sep is None:
             self._place_on_gpu(None)  # load next to the other models in RAM, not on top of them in VRAM
+            self.gov.wait(self._model_need(model), HUB.check_cancel, on_wait)
             sep = Separator(
                 log_level=logging.WARNING,
                 model_file_dir=str(models_dir()),
@@ -303,9 +484,12 @@ class StemEngine:
             )
             logging.getLogger("audio_separator").setLevel(logging.INFO)
             self._attach_logging()
+            self.gov.mark()
             sep.load_model(model_filename=model)
             self._separators[model] = sep
-            memlog(f"{model} loaded", self.log)
+            took = self.gov.drop_since_mark()
+            self._load_cost[model] = took
+            memlog(f"{model} loaded (took {took / MB:.0f} MB while loading)", self.log)
         sep.output_dir = str(out_dir)
         if getattr(sep, "model_instance", None) is not None:
             sep.model_instance.output_dir = str(out_dir)
@@ -317,7 +501,7 @@ class StemEngine:
 
         Only "maximum" has two models. Both on a 4 GB GPU overflow its memory and Windows then
         spills into shared system RAM, which made the split several times slower; moving a model
-        between RAM and VRAM takes a fraction of a second. demix() runs on wherever the model is.
+        between RAM and VRAM takes a fraction of a second. Inference runs wherever the model is.
         (Apple GPUs share one memory with the CPU, so there is nothing to gain there.)
         """
         if not self._separators:
@@ -339,6 +523,29 @@ class StemEngine:
         if freed:
             torch.cuda.empty_cache()
 
+    def _empty_caches(self) -> None:
+        gc.collect()
+        torch = sys.modules.get("torch")
+        if torch is None:
+            return
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+        except Exception:
+            pass
+
+    def _shed(self, level: str) -> None:
+        """Memory governor callback: give back what isn't needed right now."""
+        if level in ("tight", "over"):
+            idle = [m for m in self._separators if m != self._active_model]
+            for m in idle:  # reloaded when needed again (a few seconds), instead of stalling
+                del self._separators[m]
+            if idle:
+                self.log(f"Low memory: unloaded {', '.join(idle)} until it is needed")
+        self._empty_caches()
+
     def _keep_only(self, preset: Preset) -> None:
         """Unload models the preset doesn't use (e.g. the vocal model after leaving "maximum")."""
         wanted = {model for model, _, _ in self._models_for(preset)}
@@ -347,11 +554,7 @@ class StemEngine:
             return
         for m in stale:
             del self._separators[m]
-        gc.collect()
-        import torch
-
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        self._empty_caches()
         memlog("unused models released", self.log)
 
     @staticmethod
@@ -380,52 +583,219 @@ class StemEngine:
 
             HUB.on_bar = on_bar
             progress(base, f"Loading {label}...")
-            self._separator(model, overlap, self._work_dir)
+            self._separator(model, overlap, self._work_dir,
+                            on_wait=lambda short: progress(base, _waiting_text(short)))
         HUB.on_bar = None
         progress(1.0, "Models ready")
 
-    def _run_model(
-        self, model: str, overlap: int, mix: np.ndarray, label: str, report, keep: set[str]
-    ) -> dict[str, np.ndarray]:
-        """Run one model on `mix` (samples x channels, peak <= 1) in memory.
+    def can_preload(self, quality: str) -> bool:
+        """True if the preset's models fit in the memory budget right now (preloading never waits)."""
+        need = sum(self._model_need(m) for m, _, _ in self._models_for(get_preset(quality)))
+        self.gov.sample()
+        return self.gov.headroom >= need
 
-        Returns {stem name (lower case): samples x channels} for the stems in `keep` only: the
-        model's outputs are views of one big array, so copying just the needed ones and dropping
-        the rest frees it right away. Calling the model's demix()
-        directly skips the library's WAV round trip (write the mix, read it back with librosa,
-        write every stem, read them back): ~5 s and ~0.8 GB of disk traffic per song.
+    def _stream_model(
+        self, model: str, overlap: int, work: _Work, frames: int, gain: float, outputs: dict[str, str],
+        tag: str, label: str, report,
+    ) -> None:
+        """Run one model over the song, streaming: `outputs` maps a model stem (lower case) to a work file.
+
+        This is the library's RoFormer demix() loop (same chunk schedule, Hamming window,
+        overlap-add, counter and division, in the same order, so the output is bit-identical),
+        except that every sample is divided out and written to disk as soon as no later chunk
+        covers it. Memory is then one chunk of buffers instead of the whole song times every
+        stem. The loop also checkpoints itself, retries a chunk that ran out of memory and asks
+        the memory governor before each chunk.
         """
+        import torch
+        from audio_separator.separator.architectures import mdxc_separator as mdxc
+        from scipy import signal
 
         def downloading(frac: float, mb: float) -> None:
             report(0, f"Downloading model (first run only): {mb:.0f} MB ({frac:.0%})")
 
-        HUB.on_bar = self._bar_tracker(lambda f: report(f, f"{label}... {f:.0%}"), 1, downloading)
+        HUB.on_bar = self._bar_tracker(lambda f: None, 1, downloading)
         report(0, "Loading model...")
-        mi = self._separator(model, overlap, self._work_dir).model_instance
+        self._active_model = model
+        mi = self._separator(model, overlap, self._work_dir, on_wait=lambda s: report(0, _waiting_text(s))).model_instance
+        HUB.on_bar = None
         self._place_on_gpu(model)
         report(0, f"{label}...")
-        # same rule the library applies in separate(): very short clips use the configured segment size
-        use_override = getattr(mi, "_use_model_segment_override", lambda seconds: False)
-        out = mi.demix(np.ascontiguousarray(mix.T), override_model_segment_size=use_override(len(mix) / SAMPLE_RATE))
-        HUB.on_bar = None
-        HUB.check_cancel()
-        if isinstance(out, np.ndarray):  # single-target model without a residual
-            out = {"vocals": out}
-        memlog(f"{label} done", self.log)
-        return {k.lower(): np.ascontiguousarray(v.T, dtype=np.float32) for k, v in out.items() if k.lower() in keep}
 
-    def _decode(self, input_path: Path) -> np.ndarray:
-        """Decode any input to 44.1 kHz stereo float32 (samples x 2), piped straight into memory."""
-        raw = self._run_ffmpeg(["-i", str(input_path), "-vn", "-ac", "2", "-ar", str(SAMPLE_RATE), "-f", "f32le", "-"])
-        mix = np.frombuffer(raw, dtype=np.float32).reshape(-1, 2)
-        if not len(mix):
+        cfg = mi.model_data_cfgdict
+        # same rule the library applies in separate(): very short clips use the configured segment size
+        use_override = getattr(mi, "_use_model_segment_override", lambda seconds: False)(frames / SAMPLE_RATE)
+        dim_t = mi.segment_size if use_override else cfg.inference.dim_t
+        hop = getattr(cfg.model, "stft_hop_length", None) or cfg.audio.hop_length
+        chunk = int(hop) * (int(dim_t) - 1)
+        step = chunk // mi.overlap
+        instruments = [str(i).lower() for i in cfg.training.instruments]
+        target = cfg.training.target_instrument
+        rows = {name: (0 if target else instruments.index(name)) for name in outputs}
+        device = next(mi.model_run.parameters()).device
+        estimated = mdxc._estimate_roformer_full_track_buffer_bytes(len(instruments), 2, frames, chunk)
+        acc = device if mdxc.should_accumulate_on_device(device, estimated) else torch.device("cpu")
+        window = torch.tensor(signal.windows.hamming(chunk), dtype=torch.float32, device=acc)
+        starts = mi._roformer_chunk_starts(frames, chunk, step)
+        shape = (len(instruments), 2, chunk)
+
+        mix = work.array("mix", frames, "r")
+        saved = dict(work.state.get(tag) or {})
+        resumable = all(work.path(f).is_file() for f in outputs.values())
+        if resumable and saved.get("next") and (work.dir / saved.get("window", "-")).is_file():
+            k0, base = saved["next"], saved["base"]
+            with np.load(work.dir / saved["window"]) as buffers:  # closed at once (Windows can't delete open files)
+                result = torch.from_numpy(buffers["result"]).to(acc)
+                counter = torch.from_numpy(buffers["counter"]).to(acc)
+            outs = {name: work.array(f, frames, "r+") for name, f in outputs.items()}
+            self.log(f"{label}: resuming at {starts[k0] / SAMPLE_RATE:.0f}s")
+        else:
+            k0, base = 0, 0
+            result = torch.zeros(shape, dtype=torch.float32, device=acc)
+            counter = torch.zeros(shape, dtype=torch.float32, device=acc)
+            outs = {name: work.array(f, frames, "w+") for name, f in outputs.items()}
+
+        def flush(n: int) -> None:
+            """Divide out and write the first n samples of the buffers (song position `base`)."""
+            if n <= 0:
+                return
+            c = counter[..., :n].clamp(min=1e-10)
+            done = (result[..., :n] / c).cpu().numpy()
+            for name, mm in outs.items():
+                mm[base : base + n] = done[rows[name]].T
+
+        def checkpoint(k_next: int) -> None:
+            for mm in outs.values():
+                mm.flush()
+            name = f"{tag}-{k_next}.npz"
+            np.savez(work.dir / name, result=result.cpu().numpy(), counter=counter.cpu().numpy())
+            old = saved.get("window")
+            work.save(**{tag: {"next": k_next, "base": base, "window": name}})
+            saved["window"] = name
+            if old and old != name:
+                work.unlink(old)
+
+        need = self._chunk_need.get(model, CHUNK_NEED_DEFAULT)
+        last_checkpoint = time.monotonic()
+        k = k0
+        attempts = 0
+        with torch.no_grad():
+            while k < len(starts):
+                start = starts[k]
+                if start > base:  # samples before `start` get nothing more: finish them, slide the window
+                    shift = start - base
+                    flush(shift)
+                    keep = chunk - shift
+                    result[..., :keep] = result[..., shift:].clone()
+                    counter[..., :keep] = counter[..., shift:].clone()
+                    result[..., keep:] = 0
+                    counter[..., keep:] = 0
+                    base = start
+                HUB.check_cancel()
+                self.gov.wait(need, HUB.check_cancel, lambda s: report(k / len(starts), _waiting_text(s)))
+                self._limit_mps()
+                self.gov.mark()
+                part = mix[start : start + chunk]
+                if gain != 1.0:
+                    part = part * gain
+                part = torch.from_numpy(np.ascontiguousarray(part.T)).to(device)
+                length = part.shape[-1]
+                try:
+                    x = mi._run_roformer_model(part)
+                    if x.device != acc:
+                        x = x.to(acc)
+                except Exception as exc:
+                    if not _is_oom(exc) or attempts >= OOM_RETRIES:
+                        raise
+                    # Out of memory inside the model: nothing was added for this chunk, so free
+                    # memory, wait for more and run the same chunk again.
+                    attempts += 1
+                    del part
+                    x = None
+                    self._empty_caches()
+                    need = int(need * 1.5)
+                    self._chunk_need[model] = need
+                    report(k / len(starts), "Not enough memory for this step: waiting and retrying...")
+                    time.sleep(min(2.0 ** attempts, 30.0))
+                    continue
+                attempts = 0
+                mi.overlap_add(result, x, window, 0, length)
+                safe_len = min(length, x.shape[-1], window.shape[0])
+                if safe_len > 0:
+                    counter[..., :safe_len] += window[:safe_len]
+                del x, part
+                # learn what one chunk really costs on this machine (RAM plus Apple GPU memory)
+                need = max(CHUNK_NEED_MIN, int(self.gov.drop_since_mark() * 1.25), int(need * 0.9))
+                self._chunk_need[model] = need
+                if self.gov.level() in ("tight", "over"):
+                    self._empty_caches()
+                k += 1
+                report(k / len(starts), f"{label}... {k / len(starts):.0%}")
+                if time.monotonic() - last_checkpoint >= CHECKPOINT_SECONDS and k < len(starts):
+                    checkpoint(k)
+                    last_checkpoint = time.monotonic()
+            flush(frames - base)
+        for mm in outs.values():
+            mm.close()
+        outs.clear()
+        mix.close()
+        if saved.get("window"):
+            work.unlink(saved["window"])
+        work.save(**{tag: {"done": True}})
+        self._active_model = None
+        memlog(f"{label} done", self.log)
+
+    def _limit_mps(self) -> None:
+        """Apple GPU: cap PyTorch at what the budget allows, so it raises (and the chunk is retried)
+        instead of pushing macOS into swap. CUDA has its own VRAM; the CPU path uses the governor."""
+        torch = sys.modules.get("torch")
+        try:
+            if torch is None or not torch.backends.mps.is_available():
+                return
+            allowed = torch.mps.driver_allocated_memory() + max(self.gov.headroom, 0)
+            fraction = min(1.0, max(0.05, allowed / torch.mps.recommended_max_memory()))
+            if abs(fraction - getattr(self, "_mps_fraction", 0.0)) > 0.02:
+                torch.mps.set_per_process_memory_fraction(fraction)
+                self._mps_fraction = fraction
+        except Exception:
+            pass
+
+    def _decode(self, input_path: Path, work: _Work) -> tuple[int, float]:
+        """Decode any input to 44.1 kHz stereo float32 into the song's work folder; returns (frames, peak)."""
+        cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(input_path), "-vn", "-ac", "2",
+               "-ar", str(SAMPLE_RATE), "-f", "f32le", "-"]
+        peak, size = 0.0, 0
+        with tempfile.TemporaryFile() as err, open(work.path("mix"), "wb") as out:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, **subprocess_flags())
+            pending = b""
+            while True:
+                data = proc.stdout.read(BLOCK_FRAMES * 8)
+                if not data:
+                    break
+                out.write(data)
+                size += len(data)
+                data = pending + data
+                whole = len(data) - len(data) % 8
+                if whole:
+                    peak = max(peak, float(np.max(np.abs(np.frombuffer(data[:whole], dtype=np.float32)))))
+                pending = data[whole:]
+                HUB.check_cancel()
+            proc.stdout.close()
+            if proc.wait() != 0:
+                err.seek(0)
+                raise RuntimeError(_ffmpeg_error(err.read()))
+        frames = size // 8
+        if not frames:
             raise RuntimeError(f"No audio found in {input_path.name}")
-        return mix
+        return frames, peak
 
     def split(
         self, input_path: Path, opts: Options, progress: ProgressFn, cancel: Optional[threading.Event] = None
     ) -> Separated:
-        """Decode and separate one song; the stems stay in memory (see write_stems)."""
+        """Decode and separate one song into stem files in its work folder (see write_stems).
+
+        A song that was cancelled or interrupted (crash, power cut) continues where it stopped.
+        """
         t0 = time.time()
         input_path = Path(input_path)
         if not input_path.is_file():
@@ -433,6 +803,8 @@ class StemEngine:
         HUB.cancel_event = cancel
         preset = get_preset(opts.quality)
         self._keep_only(preset)
+        work = _Work(self._songs_dir, _song_key(input_path, opts))
+        st = work.state
         timings: dict[str, float] = {}
         mark = time.time()
 
@@ -445,93 +817,156 @@ class StemEngine:
         try:
             # Weighted stages -> one smooth overall progress value (the vocal pass is ~3/4 of the stem pass).
             if preset.vocal_overlap:
-                stages = {"decode": (0.00, 0.02), "stems": (0.02, 0.55), "vocals": (0.55, 0.95)}
+                stages = {"decode": (0.00, 0.02), "stems": (0.02, 0.55), "vocals": (0.55, 0.93), "mix": (0.93, 0.95)}
             else:
-                stages = {"decode": (0.00, 0.02), "stems": (0.02, 0.95)}
+                stages = {"decode": (0.00, 0.02), "stems": (0.02, 0.93), "mix": (0.93, 0.95)}
 
             def stage(name: str):
                 a, b = stages[name]
                 return lambda frac, text: progress(a + (b - a) * max(0.0, min(1.0, frac)), text)
 
             # 1) decode ----------------------------------------------------------------------
-            stage("decode")(0, "Decoding audio...")
-            mix = self._decode(input_path)
+            if st.get("frames"):
+                frames, peak = st["frames"], st["peak"]
+            else:
+                stage("decode")(0, "Decoding audio...")
+                frames, peak = self._decode(input_path, work)
+                self._check_disk(work, frames, opts)
+                work.save(frames=frames, peak=peak)
             memlog(f"{input_path.name} decoded", self.log)
-            HUB.check_cancel()
             # Loud masters decode with peaks above 1.0. The models want a peak <= 1, so scale the
             # input down and the stems back up: "Other = mix - the rest" then stays exact. (Letting
             # the library normalize on its own left part of every other stem inside "Other".)
-            peak = float(np.max(np.abs(mix)))
             gain = 1.0 / peak if peak > 1.0 else 1.0
-            model_in = mix * gain if gain != 1.0 else mix
             lap("decode")
 
             # 2) all stems in one pass ------------------------------------------------------------
             # (the model's own "other" is never used: Other is rebuilt below from the mix)
             names = ["Vocals", "Drums", "Bass", *(EXTRA_STEMS if opts.guitar_piano else [])]
-            sw = self._run_model(STEM_MODEL, preset.stem_overlap, model_in, "Separating stems", stage("stems"),
-                                 keep={k.lower() for k in names})
-            lap("stems")
+            if not st.get("assembled"):
+                if not (st.get("stems") or {}).get("done"):
+                    self._stream_model(STEM_MODEL, preset.stem_overlap, work, frames, gain,
+                                       {k.lower(): f"sw_{k}" for k in names}, "stems", "Separating stems",
+                                       stage("stems"))
+                lap("stems")
 
-            # 3) maximum: average with a second, vocal-only model -----------------------------------
-            if preset.vocal_overlap:
-                kim = self._run_model(VOCAL_MODEL, preset.vocal_overlap, model_in, "Refining vocals",
-                                      stage("vocals"), keep={"vocals"})["vocals"]
-                n = min(len(sw["vocals"]), len(kim))
-                vocals = sw["vocals"][:n]
-                vocals += kim[:n]  # in place: same result as 0.5 * (vocals + kim), no temporaries
-                vocals *= 0.5
-                sw["vocals"] = vocals
-                del kim
-                lap("vocals")
-            del model_in
+                # 3) maximum: a second, vocal-only model, averaged in below ---------------------------
+                if preset.vocal_overlap and not (st.get("vocals") or {}).get("done"):
+                    self._stream_model(VOCAL_MODEL, preset.vocal_overlap, work, frames, gain,
+                                       {"vocals": "mel_Vocals"}, "vocals", "Refining vocals", stage("vocals"))
+                    lap("vocals")
 
-            # 4) assemble ---------------------------------------------------------------------------
-            # Every array in `sw` belongs to this function, so it is trimmed and rescaled in place.
-            n = min(len(mix), *(len(a) for a in sw.values()))
-            stems = {k: sw.pop(k.lower())[:n] for k in names}
-            if gain != 1.0:
-                for a in stems.values():
-                    a /= gain
-            # Other = everything not claimed by another stem, so the stems add up to the song exactly.
-            # Summed into one buffer (same order as sum(), so the same result) that then holds Other.
-            other = stems["Vocals"] + stems["Drums"]
-            for k in names[2:]:
-                other += stems[k]
-            np.subtract(mix[:n], other, out=other)
-            stems["Other"] = other
-            stems = {k: stems[k] for k in [*STEM_ORDER, *EXTRA_STEMS] if k in stems}
+                # 4) assemble -----------------------------------------------------------------------
+                stage("mix")(0, "Assembling stems...")
+                self._assemble(work, frames, names, gain, bool(preset.vocal_overlap), opts.also_instrumental)
+                work.drop(*(f"sw_{k}" for k in names), "mel_Vocals")
+            order = [k for k in [*STEM_ORDER, *EXTRA_STEMS] if k in [*names, "Other"]]
             if opts.also_instrumental:
-                stems["Instrumental"] = mix[:n] - stems["Vocals"]
-            del mix
+                order.append("Instrumental")
+            stems = {k: work.array(f"out_{k}", frames, "r") for k in order}
             memlog("stems assembled", self.log)
-            return Separated(input_path, stems, SAMPLE_RATE, timings, t0)
+            return Separated(input_path, stems, SAMPLE_RATE, timings, t0, work=work,
+                             peaks=dict(work.state.get("peaks", {})))
         finally:
             HUB.on_bar = None
+            self._active_model = None
+
+    def _check_disk(self, work: _Work, frames: int, opts: Options) -> None:
+        files = 2 * (5 + bool(opts.guitar_piano) * 2 + bool(opts.also_instrumental) + 2)  # inputs + outputs, generous
+        need = frames * 8 * files + 200 * MB
+        free = shutil.disk_usage(work.dir).free
+        if free < need:
+            raise RuntimeError(f"Not enough free disk space: {need / GB:.1f} GB needed in {work.dir.parent}, "
+                               f"{free / GB:.1f} GB free")
+
+    def _assemble(self, work: _Work, frames: int, names: list[str], gain: float, maximum: bool,
+                  instrumental: bool) -> None:
+        """Build the final stems block by block (same operations, in the same order, as in memory).
+
+        Vocals = average of the two models in "maximum"; every stem / gain; Other = mix - the
+        rest; Instrumental = mix - Vocals. Also records each stem's peak for clipping protection.
+        The inputs are not modified, so an interrupted assembly simply runs again.
+        """
+        mix = work.array("mix", frames, "r")
+        src = {k: work.array(f"sw_{k}", frames, "r") for k in names}
+        mel = work.array("mel_Vocals", frames, "r") if maximum else None
+        finals = [*names, "Other", *(["Instrumental"] if instrumental else [])]
+        out = {k: work.array(f"out_{k}", frames, "w+") for k in finals}
+        peaks = dict.fromkeys(finals, 0.0)
+        for i in range(0, frames, BLOCK_FRAMES):
+            j = min(frames, i + BLOCK_FRAMES)
+            HUB.check_cancel()
+            block = {k: np.array(src[k][i:j]) for k in names}
+            if maximum:
+                block["Vocals"] += mel[i:j]  # same as 0.5 * (vocals + kim)
+                block["Vocals"] *= 0.5
+            if gain != 1.0:
+                for a in block.values():
+                    a /= gain
+            # Other = everything not claimed by another stem, so the stems add up to the song exactly.
+            # Summed in the same order as sum(), so the same result.
+            other = block["Vocals"] + block["Drums"]
+            for k in names[2:]:
+                other += block[k]
+            m = mix[i:j]
+            np.subtract(m, other, out=other)
+            block["Other"] = other
+            if instrumental:
+                block["Instrumental"] = m - block["Vocals"]
+            for k in finals:
+                out[k][i:j] = block[k]
+                if j > i:
+                    peaks[k] = max(peaks[k], float(np.max(np.abs(block[k]))))
+        for t in [*out.values(), *src.values(), mix, *([mel] if mel is not None else [])]:
+            t.close()
+        work.save(assembled=True, peaks=peaks, encoded=[])
 
     def write_stems(
         self, sep: Separated, opts: Options, progress: ProgressFn, cancel: Optional[threading.Event] = None
     ) -> Result:
-        """Encode and save the stems of one song, all in parallel (LAME is single-threaded).
+        """Encode and save the stems of one song in parallel (LAME is single-threaded).
 
-        Safe to run on another thread while the next song is being separated.
+        How many run at once follows the memory governor. Safe to run on another thread while
+        the next song is being separated.
         """
         t = time.time()
         song = sep.input_path.stem
         dest = Path(opts.output_dir) / _safe_name(song)
         dest.mkdir(parents=True, exist_ok=True)
         jobs = {name: dest / f"{_safe_name(song)} - {name}.{opts.output_format}" for name in sep.stems}
+        done_before = set(sep.work.state.get("encoded", [])) if sep.work is not None else set()
+        todo = [n for n in jobs if not (str(jobs[n]) in done_before and jobs[n].is_file())]
         progress(0.95, "Writing files...")
-        with ThreadPoolExecutor(max_workers=min(len(jobs), os.cpu_count() or 1)) as pool:
-            futures = {}
-            for name, out in jobs.items():
-                if cancel is not None and cancel.is_set():
-                    raise Cancelled()
-                futures[pool.submit(self._write_stem, sep.stems[name], sep.sr, out, opts, f"{song} ({name})")] = name
-            for i, fut in enumerate(as_completed(futures)):
-                fut.result()
-                progress(0.95 + 0.05 * (i + 1) / len(futures), f"Writing files... {i + 1}/{len(futures)}")
+        finished = len(jobs) - len(todo)
+        with ThreadPoolExecutor(max_workers=max(1, min(len(jobs), os.cpu_count() or 1))) as pool:
+            running: dict = {}
+            queue_ = list(todo)
+            while queue_ or running:
+                while queue_ and len(running) < self.gov.encoder_slots(len(jobs)):
+                    if cancel is not None and cancel.is_set():
+                        raise Cancelled()
+                    self.gov.wait(ENCODER_NEED, lambda: _raise_if(cancel),
+                                  lambda s: progress(0.95, _waiting_text(s)))
+                    name = queue_.pop(0)
+                    peak = sep.peaks.get(name)
+                    running[pool.submit(self._write_stem, sep.stems[name], sep.sr, jobs[name], opts,
+                                        f"{song} ({name})", peak, cancel)] = name
+                done, _ = wait(running, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    name = running.pop(fut)
+                    fut.result()
+                    finished += 1
+                    if sep.work is not None:
+                        with self._encoded_lock:
+                            sep.work.save(encoded=sorted({*sep.work.state.get("encoded", []), str(jobs[name])}))
+                    progress(0.95 + 0.05 * finished / len(jobs), f"Writing files... {finished}/{len(jobs)}")
         memlog(f"{song} written", self.log)
+        for track in sep.stems.values():
+            if isinstance(track, _Track):
+                track.close()  # (Windows can't delete open files)
+        sep.stems.clear()
+        if sep.work is not None:
+            sep.work.remove()
         timings = {**sep.timings, "encode": time.time() - t}
         result = Result(input_path=sep.input_path, stems=jobs, seconds=time.time() - sep.started)
         self.log(f"{song}: {result.seconds:.0f}s (" + ", ".join(f"{k} {v:.1f}s" for k, v in timings.items()) + ")")
@@ -545,8 +980,10 @@ class StemEngine:
         return self.write_stems(self.split(input_path, opts, progress, cancel), opts, progress, cancel)
 
     def close(self) -> None:
+        if self._own_gov:
+            self.gov.stop()
         self._separators.clear()
-        gc.collect()
+        self._empty_caches()
         shutil.rmtree(self._work_dir, ignore_errors=True)
 
     # -- internals ------------------------------------------------------------------------
@@ -571,37 +1008,64 @@ class StemEngine:
 
         return on_bar
 
-    def _write_stem(self, audio: np.ndarray, sr: int, out: Path, opts: Options, title: str) -> None:
-        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
-        audio = np.ascontiguousarray(audio, dtype=np.float32)
-        if peak > 0.999:  # avoid clipping in the encoded file
-            if audio.flags.writeable:
-                audio *= 0.999 / peak  # in place: the stem is not needed after this
+    def _write_stem(self, audio: np.ndarray, sr: int, out: Path, opts: Options, title: str,
+                    peak: Optional[float] = None, cancel=None) -> None:
+        """Stream one stem to its file block by block (it is never copied whole into memory)."""
+        if peak is None:
+            peak = max((float(np.max(np.abs(audio[i : i + BLOCK_FRAMES]))) for i in range(0, len(audio), BLOCK_FRAMES)),
+                       default=0.0)
+        scale = 0.999 / peak if peak > 0.999 else None  # avoid clipping in the encoded file
+
+        def blocks():
+            for i in range(0, len(audio), BLOCK_FRAMES):
+                _raise_if(cancel)
+                block = np.ascontiguousarray(audio[i : i + BLOCK_FRAMES], dtype=np.float32)
+                yield block * scale if scale is not None else block
+
+        tmp = out.with_name(out.stem + ".part" + out.suffix)  # never leave a half-written file under the real name
+        try:
+            if opts.output_format == "wav":
+                with sf.SoundFile(tmp, "w", sr, audio.shape[1], subtype="PCM_24", format="WAV") as f:
+                    for block in blocks():
+                        f.write(block)
             else:
-                audio = audio * (0.999 / peak)
-        if opts.output_format == "wav":
-            sf.write(out, audio, sr, subtype="PCM_24")
-            return
-        self._run_ffmpeg(
-            [
-                "-f",
-                "f32le",
-                "-ar",
-                str(sr),
-                "-ac",
-                str(audio.shape[1]),
-                "-i",
-                "pipe:0",
-                "-c:a",
-                "libmp3lame",
-                "-b:a",
-                f"{opts.bitrate_kbps}k",
-                "-metadata",
-                f"title={title}",
-                str(out),
-            ],
-            stdin=memoryview(audio).cast("B"),  # the samples' own buffer, no tobytes() copy
-        )
+                cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "f32le", "-ar", str(sr), "-ac",
+                       str(audio.shape[1]), "-i", "pipe:0", "-c:a", "libmp3lame", "-b:a", f"{opts.bitrate_kbps}k",
+                       "-metadata", f"title={title}", "-f", "mp3", str(tmp)]
+                with tempfile.TemporaryFile() as err:
+                    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err,
+                                            **subprocess_flags())
+                    try:
+                        for block in blocks():
+                            proc.stdin.write(memoryview(block).cast("B"))
+                        proc.stdin.close()
+                    except BrokenPipeError:
+                        pass
+                    except BaseException:
+                        proc.kill()
+                        proc.wait()
+                        raise
+                    if proc.wait() != 0:
+                        err.seek(0)
+                        raise RuntimeError(_ffmpeg_error(err.read()))
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        os.replace(tmp, out)
+
+
+def _raise_if(cancel) -> None:
+    if cancel is not None and cancel.is_set():
+        raise Cancelled()
+
+
+def _waiting_text(short: int) -> str:
+    return f"Waiting for free memory ({max(short, 0) / MB:.0f} MB more needed)..."
+
+
+def _ffmpeg_error(stderr: bytes) -> str:
+    err = stderr.decode(errors="replace").strip().splitlines()
+    return f"Could not read/write audio (ffmpeg): {err[-1] if err else 'unknown error'}"
 
 
 def _safe_name(name: str) -> str:
