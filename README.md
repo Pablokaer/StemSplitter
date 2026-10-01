@@ -1,5 +1,7 @@
 # StemSplitter
 
+> Full technical documentation (in Portuguese): features, quality measurements, performance and optimizations, architecture, build and CI. See [docs/DOCUMENTACAO.md](docs/DOCUMENTACAO.md).
+
 A desktop app for **Windows and macOS** that takes a song (MP3, WAV, FLAC, M4A, …) and splits it into four MP3 files:
 
 | Stem | What's in it |
