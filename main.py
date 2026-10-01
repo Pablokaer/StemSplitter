@@ -29,6 +29,9 @@ def run_cli(argv: list[str]) -> int:
     parser.add_argument("--reserve-mb", type=int, default=0,
                         help="memory (MB) the system must keep free; the app slows down or waits instead "
                              "of using it (default: automatic)")
+    parser.add_argument("--no-memory-limit", action="store_true",
+                        help="ignore the memory limit: never wait for free memory (the system may swap "
+                             "or end the app)")
     args = parser.parse_args(argv)
 
     last = {"pct": -1}
@@ -42,6 +45,7 @@ def run_cli(argv: list[str]) -> int:
     engine = StemEngine(log=lambda m: print(f"\n  {m}"))
     if args.reserve_mb > 0:
         engine.gov.set_reserve(args.reserve_mb * 1024 * 1024)
+    engine.gov.set_unlimited(args.no_memory_limit)
     import torch
 
     if torch.cuda.is_available():

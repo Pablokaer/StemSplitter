@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
 from .icons import pixmap
 from .theme import Colors, Sizes, Spacing
@@ -107,6 +107,14 @@ class SettingsPage(QScrollArea):
             "StemSplitter never uses this much of the free memory, so the computer stays responsive. When memory "
             "runs short it slows down or waits, and never loses work. Automatic keeps 2 GB free, or a quarter of "
             "the RAM on machines with less than 8 GB.", "hint", wrap=True))
+        lay.addSpacing(Spacing.SM)
+        self.chk_unlimited = QCheckBox("Ignore the memory limit")
+        self.chk_unlimited.toggled.connect(lambda on: self.reserve.setEnabled(not on))
+        lay.addWidget(self.chk_unlimited)
+        lay.addWidget(label(
+            "Uses all the memory it wants and never waits for free memory: the fastest option, but the computer "
+            "can slow down or swap, and the system may end the app if it runs out of memory (the split then "
+            "resumes from its checkpoint). Use it only when nothing else important is running.", "hint", wrap=True))
         note = label("The output folder, quality and format are set on the Split page and are remembered "
                      "between sessions.", "muted", wrap=True)
         fill_page(self, page_header("Settings", "Preferences that apply to every split."), card, note)
