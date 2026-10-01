@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import multiprocessing
+import queue
 import sys
-import threading
-import traceback
-from concurrent.futures import ThreadPoolExecutor
+import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter
 from PySide6.QtWidgets import (
     QApplication,
@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import APP_NAME, __version__
+from .memory import memlog
 from .platform_utils import default_output_dir, open_folder
 
 SUPPORTED = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".aiff", ".aif", ".wma"}
@@ -57,8 +58,16 @@ def resource_path(rel: str) -> Path:
 
 
 # --------------------------------------------------------------------------------------
-class Worker(QObject):
-    """Runs the separation on a background thread so the window stays responsive."""
+class EngineProcess(QObject):
+    """Runs the separation in a worker process (stemsplitter.worker), so the window never loads PyTorch.
+
+    The process lives for a whole batch (models are loaded once) and a short while after it,
+    so a song added right away reuses the loaded models; then it exits and its RAM goes back to
+    the OS.
+    """
+
+    IDLE_SECONDS = 30
+    POLL_MS = 50
 
     status = Signal(int, float, str)  # row, fraction, text
     file_done = Signal(int, dict, float)  # row, {stem: path}, seconds
@@ -66,91 +75,121 @@ class Worker(QObject):
     log = Signal(str)
     device = Signal(str)
     finished = Signal(bool)  # cancelled?
+    stopped = Signal()  # the worker process exited (its memory is released)
 
-    def __init__(self, holder: dict, jobs: list[tuple[int, Path]], opts, cancel: threading.Event):
-        super().__init__()
-        self.holder = holder  # keeps the engine (and loaded models) alive between runs
-        self.jobs = jobs
-        self.opts = opts
-        self.cancel = cancel
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._ctx = multiprocessing.get_context("spawn")  # fork + Qt don't mix; spawn is the default on Win/macOS
+        self._proc = None
+        self._commands = self._events = self._cancel = None
+        self._pending: list[int] = []  # rows of the running batch not yet reported done/failed
+        self.busy = False
+        self._poll = QTimer(self)
+        self._poll.setInterval(self.POLL_MS)
+        self._poll.timeout.connect(self._drain)
+        self._idle = QTimer(self)
+        self._idle.setSingleShot(True)
+        self._idle.setInterval(self.IDLE_SECONDS * 1000)
+        self._idle.timeout.connect(self.shutdown)
 
-    @Slot()
-    def run(self) -> None:
-        cancelled = False
-        try:
-            from .engine import Cancelled, StemEngine
+    def run(self, jobs: list[tuple[int, Path]], opts) -> None:
+        self._idle.stop()
+        if self._proc is not None and not self._proc.is_alive():
+            self._cleanup()  # it died while idle
+        if self._proc is None:
+            self._spawn()
+        self._cancel.clear()
+        self._pending = [row for row, _ in jobs]
+        self.busy = True
+        self._commands.put((jobs, opts))
+        self._poll.start()
 
-            if self.holder.get("engine") is None:
-                self.status.emit(self.jobs[0][0], 0.0, "Starting engine (loading PyTorch)...")
-                self.holder["engine"] = StemEngine(log=self.log.emit)
-                self.device.emit(_describe_device())
-            engine = self.holder["engine"]
+    def cancel(self) -> None:
+        if self._cancel is not None:
+            self._cancel.set()
 
-            # Song N is encoded on a writer thread while song N+1 is being separated. At most one
-            # song waits to be written, so memory stays bounded to about two songs of stems.
-            with ThreadPoolExecutor(max_workers=1) as writer:
-                pending = None  # (row, future) of the song being written
-                try:
-                    for row, path in self.jobs:
-                        if self.cancel.is_set():
-                            cancelled = True
-                            break
-                        progress = lambda f, t, r=row: self.status.emit(r, f, t)  # noqa: E731
-                        try:
-                            separated = engine.split(path, self.opts, progress, self.cancel)
-                        except Cancelled:
-                            cancelled = True
-                            self.file_failed.emit(row, "Cancelled")
-                            break
-                        except Exception as exc:  # keep going with the next file
-                            self.log.emit(traceback.format_exc())
-                            self.file_failed.emit(row, str(exc) or exc.__class__.__name__)
-                            continue
-                        cancelled = self._wait(pending) or cancelled
-                        pending = writer.submit(self._write, engine, row, separated, progress)
-                finally:
-                    cancelled = self._wait(pending) or cancelled
-        except Exception as exc:
-            self.log.emit(traceback.format_exc())
-            if self.jobs:
-                self.file_failed.emit(self.jobs[0][0], f"Engine error: {exc}")
+    def _spawn(self) -> None:
+        from .worker import serve
+
+        self._commands, self._events, self._cancel = self._ctx.Queue(), self._ctx.Queue(), self._ctx.Event()
+        self._proc = self._ctx.Process(target=serve, args=(self._commands, self._events, self._cancel),
+                                       name="StemSplitter worker", daemon=True)
+        self._proc.start()
+
+    def _drain(self) -> None:
+        messages = []
+        while True:
+            try:
+                messages.append(self._events.get_nowait())
+            except queue.Empty:
+                break
+        for i, msg in enumerate(messages):
+            kind = msg[0]
+            if kind == "status":
+                nxt = messages[i + 1] if i + 1 < len(messages) else None
+                if nxt is not None and nxt[0] == "status" and nxt[1] == msg[1]:
+                    continue  # superseded by a newer progress value in the same batch of messages
+                self.status.emit(*msg[1:])
+            elif kind == "done":
+                self._report(msg[1])
+                self.file_done.emit(*msg[1:])
+            elif kind == "failed":
+                self._report(msg[1])
+                self.file_failed.emit(*msg[1:])
+            elif kind == "log":
+                self.log.emit(msg[1])
+            elif kind == "device":
+                self.device.emit(msg[1])
+            elif kind == "finished":
+                self._finish(msg[1])
+                return
+        if self.busy and not self._proc.is_alive():  # crashed (e.g. out of memory): fail what is left
+            code = self._proc.exitcode
+            for row in list(self._pending):
+                self._report(row)
+                self.file_failed.emit(row, f"The separation process stopped unexpectedly (exit code {code})")
+            self._cleanup()
+            self._finish(False)
+
+    def _report(self, row: int) -> None:
+        if row in self._pending:
+            self._pending.remove(row)
+
+    def _finish(self, cancelled: bool) -> None:
+        self._poll.stop()
+        self.busy = False
+        if self._proc is not None:
+            self._idle.start()
         self.finished.emit(cancelled)
 
-    def _write(self, engine, row: int, separated, progress) -> bool:
-        """Writer thread: save one song and report it as soon as its files are on disk.
+    def shutdown(self, timeout: float = 10.0) -> None:
+        """Ask the worker to exit (it finishes the current step first); kill it after `timeout` s."""
+        self._idle.stop()
+        self._poll.stop()
+        if self._proc is None:
+            return
+        if self._proc.is_alive():
+            self._commands.put(None)
+            deadline = time.monotonic() + timeout
+            while self._proc.is_alive() and time.monotonic() < deadline:
+                try:  # keep the pipe drained so the worker never blocks while exiting
+                    while True:
+                        self._events.get_nowait()
+                except queue.Empty:
+                    pass
+                self._proc.join(0.05)
+            if self._proc.is_alive():
+                self._proc.terminate()
+                self._proc.join(2)
+        self._cleanup()
 
-        Returns True if it was cancelled.
-        """
-        from .engine import Cancelled
-
-        try:
-            res = engine.write_stems(separated, self.opts, progress, self.cancel)
-            self.file_done.emit(row, {k: str(v) for k, v in res.stems.items()}, res.seconds)
-        except Cancelled:
-            self.file_failed.emit(row, "Cancelled")
-            return True
-        except Exception as exc:
-            self.log.emit(traceback.format_exc())
-            self.file_failed.emit(row, str(exc) or exc.__class__.__name__)
-        return False
-
-    @staticmethod
-    def _wait(future) -> bool:
-        """Block until the previous song is written (bounds memory). Returns True if it was cancelled."""
-        return future.result() if future is not None else False
-
-
-def _describe_device() -> str:
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            return f"NVIDIA GPU · {torch.cuda.get_device_name(0)}"
-        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-            return "Apple Silicon GPU (Metal)"
-        return f"CPU · {torch.get_num_threads()} threads (no GPU found - this will be slow)"
-    except Exception:
-        return "CPU"
+    def _cleanup(self) -> None:
+        for q in (self._commands, self._events):
+            q.cancel_join_thread()
+            q.close()
+        self._proc = self._commands = self._events = self._cancel = None
+        self.busy = False
+        self.stopped.emit()
 
 
 # --------------------------------------------------------------------------------------
@@ -206,12 +245,17 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME}")
         self.resize(760, 680)
         self.settings = QSettings(APP_NAME, APP_NAME)
-        self.engine_holder: dict = {"engine": None}
-        self.thread: QThread | None = None
-        self.worker: Worker | None = None
-        self.cancel_event = threading.Event()
+        self.engine = EngineProcess(self)
+        self.engine.status.connect(self._on_status)
+        self.engine.file_done.connect(self._on_done)
+        self.engine.file_failed.connect(self._on_failed)
+        self.engine.log.connect(self._append_log)
+        self.engine.device.connect(self._on_device)
+        self.engine.finished.connect(self._on_finished)
+        self.engine.stopped.connect(lambda: memlog("worker process stopped (GUI process)", self._append_log))
         self._build_ui()
         self._load_settings()
+        memlog("window created (GUI process)", self._append_log)
 
     # -- UI -----------------------------------------------------------------------------
     def _build_ui(self):
@@ -393,7 +437,7 @@ class MainWindow(QMainWindow):
 
     # -- run ----------------------------------------------------------------------------
     def _busy(self) -> bool:
-        return self.thread is not None
+        return self.engine.busy
 
     def start(self):
         if self._busy():
@@ -428,23 +472,12 @@ class MainWindow(QMainWindow):
 
         for row, _ in jobs:
             self._set_item(row, "queued", "⏳")
-        self.cancel_event = threading.Event()
-        self.thread = QThread(self)
-        self.worker = Worker(self.engine_holder, jobs, opts, self.cancel_event)
-        self.worker.moveToThread(self.thread)
-        self.thread.started.connect(self.worker.run)
-        self.worker.status.connect(self._on_status)
-        self.worker.file_done.connect(self._on_done)
-        self.worker.file_failed.connect(self._on_failed)
-        self.worker.log.connect(self._append_log)
-        self.worker.device.connect(self._on_device)
-        self.worker.finished.connect(self._on_finished)
         self._set_running(True)
         self._append_log(f"Starting {len(jobs)} file(s) → {out}")
-        self.thread.start()
+        self.engine.run(jobs, opts)
 
     def _cancel(self):
-        self.cancel_event.set()
+        self.engine.cancel()
         self.status.setText("Cancelling after the current step…")
         self.btn_cancel.setEnabled(False)
 
@@ -491,10 +524,6 @@ class MainWindow(QMainWindow):
 
     @Slot(bool)
     def _on_finished(self, cancelled: bool):
-        self.thread.quit()
-        self.thread.wait()
-        self.thread = None
-        self.worker = None
         self._set_running(False)
         done = sum(1 for i in range(self.list.count()) if self.list.item(i).data(self.ROLE_STATE) == "done")
         failed = sum(1 for i in range(self.list.count()) if self.list.item(i).data(self.ROLE_STATE) == "failed")
@@ -529,14 +558,13 @@ class MainWindow(QMainWindow):
             if QMessageBox.question(self, APP_NAME, "A song is still being processed. Quit anyway?") != QMessageBox.Yes:
                 e.ignore()
                 return
-            # Stop at the next chunk boundary and wait for the worker, so no temp file is in use.
+            # Stop at the next chunk boundary and give the worker time to finish the file it is writing.
             self.hide()
-            self.cancel_event.set()
-            self.thread.quit()
-            self.thread.wait()
+            self.engine.cancel()
+            self.engine.shutdown(timeout=30)
+        else:
+            self.engine.shutdown()
         self._save_settings()
-        if self.engine_holder.get("engine") is not None:
-            self.engine_holder["engine"].close()
         e.accept()
 
 

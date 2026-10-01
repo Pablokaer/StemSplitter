@@ -94,6 +94,18 @@ def run_selftest() -> int:
         ver = subprocess.run([ffmpeg, "-version"], capture_output=True, text=True, **subprocess_flags())
         Separator(info_only=True, model_file_dir=str(models_dir()), log_level=logging.ERROR)
         engine._install_progress_hooks()
+        # the GUI runs every split in a spawned worker process: check one starts and exits cleanly
+        from stemsplitter import worker
+
+        ctx = multiprocessing.get_context("spawn")
+        commands, events = ctx.Queue(), ctx.Queue()
+        proc = ctx.Process(target=worker.serve, args=(commands, events, ctx.Event()), daemon=True)
+        proc.start()
+        commands.put(None)
+        proc.join(120)
+        if proc.exitcode != 0:
+            proc.kill()
+            raise RuntimeError(f"worker process exit code: {proc.exitcode}")
         report.write_text(
             f"OK torch={torch.__version__} cuda={torch.version.cuda} ffmpeg={ver.stdout.splitlines()[0]}\n"
         )
