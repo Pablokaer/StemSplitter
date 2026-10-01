@@ -1,4 +1,4 @@
-"""PySide6 desktop interface."""
+"""PySide6 desktop interface: the window (built from stemsplitter.ui) and the EngineProcess that runs the worker."""
 
 from __future__ import annotations
 
@@ -9,24 +9,17 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter
+from PySide6.QtGui import QFont, QGuiApplication, QIcon
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
-    QComboBox,
     QFileDialog,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
-    QProgressBar,
-    QPushButton,
+    QScrollArea,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -34,8 +27,20 @@ from PySide6.QtWidgets import (
 from . import APP_NAME, __version__
 from .memory import memlog
 from .platform_utils import default_output_dir, open_folder
-
-SUPPORTED = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".aiff", ".aif", ".wma"}
+from .ui.pages import AboutPage, BatchPage, SettingsPage
+from .ui.theme import Sizes, Spacing, Type, dark_palette, pick_font_family, stylesheet
+from .ui.widgets import (
+    DropZone,
+    FileList,
+    FileQueue,
+    OutputSettings,
+    ProcessingPanel,
+    Sidebar,
+    StatusBar,
+    format_duration,
+    page_header,
+    scan_paths,
+)
 
 FORMATS = [
     ("MP3 · 320 kbps", "mp3", 320),
@@ -57,8 +62,11 @@ QUALITIES = [
     ("Maximum (cleanest vocals, about 1.8× slower)", "maximum"),
     ("Fast (about 1.8× faster, a little more bleed)", "fast"),
 ]
-
-ACCENT = "#7C5CFF"
+QUALITY_HINTS = {
+    "balanced": "The best balance between separation quality and speed.",
+    "maximum": "Adds a second vocal model for the cleanest vocals. Takes longer.",
+    "fast": "The quickest preset, with a little more bleed between the stems.",
+}
 
 
 def resource_path(rel: str) -> Path:
@@ -245,57 +253,19 @@ class EngineProcess(QObject):
 
 
 # --------------------------------------------------------------------------------------
-class DropList(QListWidget):
-    files_dropped = Signal(list)
-
-    def __init__(self):
-        super().__init__()
-        self.setAcceptDrops(True)
-        self.setSelectionMode(QListWidget.ExtendedSelection)
-        self.setObjectName("dropList")
-        self.setMinimumHeight(180)
-        self.placeholder = "Drop MP3 files here\nor click “Add files…”"
-
-    def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
-            e.acceptProposedAction()
-
-    def dragMoveEvent(self, e):
-        if e.mimeData().hasUrls():
-            e.acceptProposedAction()
-
-    def dropEvent(self, e):
-        paths = []
-        for url in e.mimeData().urls():
-            p = Path(url.toLocalFile())
-            if p.is_dir():
-                paths += sorted(x for x in p.rglob("*") if x.suffix.lower() in SUPPORTED)
-            elif p.suffix.lower() in SUPPORTED:
-                paths.append(p)
-        if paths:
-            self.files_dropped.emit(paths)
-        e.acceptProposedAction()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        if self.count() == 0:
-            painter = QPainter(self.viewport())
-            painter.setPen(QColor("#8a8aa0"))
-            f = QFont(self.font())
-            f.setPixelSize(17)
-            painter.setFont(f)
-            painter.drawText(self.viewport().rect(), Qt.AlignCenter, self.placeholder)
-
-
-# --------------------------------------------------------------------------------------
 class MainWindow(QMainWindow):
-    ROLE_PATH = Qt.UserRole
-    ROLE_STATE = Qt.UserRole + 1  # "queued" | "running" | "done" | "failed"
+    """The window: wires the widgets of `stemsplitter.ui` to the queue and to the EngineProcess."""
+
+    ROLE_PATH = FileList.ROLE_PATH
+    ROLE_STATE = FileList.ROLE_STATE  # "queued" | "running" | "done" | "failed"
+    PAGE_SPLIT = 0
+    # progress texts whose time says nothing about the separation: the time-left estimate restarts after them
+    UNTIMED = ("Starting", "Loading", "Downloading", "Waiting")
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME}")
-        self.resize(760, 680)
+        self._fit_to_screen()
         self.settings = QSettings(APP_NAME, APP_NAME)
         self.engine = EngineProcess(self)
         self.engine.status.connect(self._on_status)
@@ -306,132 +276,142 @@ class MainWindow(QMainWindow):
         self.engine.memory.connect(self._on_memory)
         self.engine.finished.connect(self._on_finished)
         self.engine.stopped.connect(self._on_worker_stopped)
+        self._current_row: int | None = None  # the song the processing panel follows
+        self._timing: dict[int, tuple[float, float]] = {}  # row -> (time, fraction) the time left is measured from
+        self._panel_ready = True  # the panel shows the queue summary (not a finished batch's result)
         self._build_ui()
         self._load_settings()
         memlog("window created (GUI process)", self._append_log)
 
+    def _fit_to_screen(self):
+        w, h = Sizes.WINDOW
+        min_w, min_h = Sizes.WINDOW_MIN
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:  # small or scaled-up screens: never open larger than the screen
+            avail = screen.availableGeometry()
+            min_w, min_h = min(min_w, avail.width()), min(min_h, avail.height() - 40)
+            w, h = min(w, int(avail.width() * 0.92)), min(h, int(avail.height() * 0.92))
+        self.setMinimumSize(min_w, min_h)
+        self.resize(max(w, min_w), max(h, min_h))
+
     # -- UI -----------------------------------------------------------------------------
     def _build_ui(self):
         root = QWidget()
+        root.setObjectName("root")
         self.setCentralWidget(root)
-        lay = QVBoxLayout(root)
-        lay.setContentsMargins(22, 18, 22, 18)
-        lay.setSpacing(14)
+        outer = QHBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        title = QLabel(APP_NAME)
-        title.setObjectName("title")
-        subtitle = QLabel("Split any song into Vocals · Drums · Bass · Other — one MP3 per stem")
-        subtitle.setObjectName("subtitle")
-        lay.addWidget(title)
-        lay.addWidget(subtitle)
+        self.sidebar = Sidebar(__version__)
+        outer.addWidget(self.sidebar)
+        right = QVBoxLayout()
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(0)
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self._build_split_page())
+        self.batch_page = BatchPage()
+        self.batch_page.btn_folder.clicked.connect(self._pick_folder)
+        self.batch_page.btn_split.clicked.connect(lambda: self.sidebar.select(self.PAGE_SPLIT))
+        self.pages.addWidget(self.batch_page)
+        self.settings_page = SettingsPage(RESERVES)
+        self.reserve = self.settings_page.reserve
+        self.pages.addWidget(self.settings_page)
+        self.pages.addWidget(AboutPage(APP_NAME, __version__))
+        self.sidebar.page_changed.connect(self.pages.setCurrentIndex)
+        right.addWidget(self.pages, 1)
+        self.status_bar = StatusBar()
+        right.addWidget(self.status_bar)
+        outer.addLayout(right, 1)
 
-        # files
-        self.list = DropList()
-        self.list.files_dropped.connect(self.add_files)
-        lay.addWidget(self.list, 1)
+        model = self.list.model()
+        for sig in (model.rowsInserted, model.rowsRemoved, model.modelReset):
+            sig.connect(self._on_queue_changed)
+        self.quality.currentIndexChanged.connect(self._on_options_changed)
+        self.fmt.currentIndexChanged.connect(self._on_options_changed)
+        self._on_queue_changed()
 
-        row = QHBoxLayout()
-        self.btn_add = QPushButton("Add files…")
+    def _build_split_page(self) -> QWidget:
+        content = QWidget()
+        content.setObjectName("scrollContent")
+        lay = QVBoxLayout(content)
+        lay.setContentsMargins(Spacing.XXL, Spacing.XXL - 4, Spacing.XXL, Spacing.XL)
+        lay.setSpacing(Spacing.XL)
+        lay.addWidget(page_header("Split Audio into Stems",
+                                  "Separate any song into Vocals, Drums, Bass, and Other, one MP3 per stem."))
+
+        self.drop = DropZone()
+        self.drop.files_dropped.connect(self.add_files)
+        self.btn_add = self.drop.btn_add
         self.btn_add.clicked.connect(self._pick_files)
-        self.btn_remove = QPushButton("Remove selected")
+        self.btn_add_folder = self.drop.btn_folder
+        self.btn_add_folder.clicked.connect(self._pick_folder)
+        lay.addWidget(self.drop)
+
+        self.queue = FileQueue()
+        self.list = self.queue.list
+        self.list.files_dropped.connect(self.add_files)
+        self.list.remove_requested.connect(self._remove_item)
+        self.btn_remove = self.queue.btn_remove
         self.btn_remove.clicked.connect(self._remove_selected)
-        self.btn_clear = QPushButton("Clear list")
+        self.btn_clear = self.queue.btn_clear
         self.btn_clear.clicked.connect(self._clear)
-        for b in (self.btn_add, self.btn_remove, self.btn_clear):
-            row.addWidget(b)
-        row.addStretch(1)
-        lay.addLayout(row)
+        lay.addWidget(self.queue)
 
-        # settings card
-        card = QFrame()
-        card.setObjectName("card")
-        grid = QGridLayout(card)
-        grid.setContentsMargins(16, 14, 16, 14)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(10)
-
-        grid.addWidget(QLabel("Save stems to"), 0, 0)
-        self.out_edit = QLineEdit()
-        grid.addWidget(self.out_edit, 0, 1)
-        b = QPushButton("Browse…")
-        b.clicked.connect(self._pick_output)
-        grid.addWidget(b, 0, 2)
-
-        grid.addWidget(QLabel("Quality"), 1, 0)
-        self.quality = QComboBox()
-        for label, key in QUALITIES:
-            self.quality.addItem(label, key)
-        grid.addWidget(self.quality, 1, 1, 1, 2)
-
-        grid.addWidget(QLabel("Output format"), 2, 0)
-        self.fmt = QComboBox()
-        for label, fmt, br in FORMATS:
-            self.fmt.addItem(label, (fmt, br))
-        grid.addWidget(self.fmt, 2, 1, 1, 2)
-
-        self.chk_inst = QCheckBox("Also save an Instrumental track (everything except vocals)")
-        grid.addWidget(self.chk_inst, 3, 1, 1, 2)
-        self.chk_gp = QCheckBox("Also split Guitar and Piano out of Other (6 stems)")
-        grid.addWidget(self.chk_gp, 4, 1, 1, 2)
-
-        grid.addWidget(QLabel("Keep free for the system"), 5, 0)
-        self.reserve = QComboBox()
-        for label, mb in RESERVES:
-            self.reserve.addItem(label, mb)
-        self.reserve.setToolTip("StemSplitter never uses this much of the free memory, so the computer stays "
-                                "responsive. When memory runs short it slows down or waits, and never loses work.")
-        grid.addWidget(self.reserve, 5, 1, 1, 2)
-        grid.setColumnStretch(1, 1)
-        lay.addWidget(card)
-
-        # progress
-        self.status = QLabel("Ready")
-        self.status.setObjectName("status")
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 1000)
-        self.progress.setTextVisible(False)
-        self.progress.setFixedHeight(10)
-        lay.addWidget(self.status)
-        lay.addWidget(self.progress)
-
-        row = QHBoxLayout()
-        self.device_label = QLabel("")
-        self.device_label.setObjectName("device")
-        row.addWidget(self.device_label, 1)
-        self.memory_label = QLabel("")
-        self.memory_label.setObjectName("device")
-        row.addWidget(self.memory_label)
-        self.btn_log = QPushButton("Show log")
-        self.btn_log.setCheckable(True)
-        self.btn_log.toggled.connect(
-            lambda on: (self.log.setVisible(on), self.btn_log.setText("Hide log" if on else "Show log"))
-        )
-        self.btn_open = QPushButton("Open output folder")
-        self.btn_open.clicked.connect(self._open_output)
-        self.btn_cancel = QPushButton("Cancel")
-        self.btn_cancel.clicked.connect(self._cancel)
-        self.btn_cancel.setEnabled(False)
-        self.btn_start = QPushButton("Split stems")
-        self.btn_start.setObjectName("primary")
-        self.btn_start.clicked.connect(self.start)
-        for w in (self.btn_log, self.btn_open, self.btn_cancel, self.btn_start):
-            row.addWidget(w)
-        lay.addLayout(row)
+        self.output = OutputSettings(QUALITIES, FORMATS)
+        self.out_edit = self.output.out_edit
+        self.output.btn_browse.clicked.connect(self._pick_output)
+        self.quality = self.output.quality
+        self.fmt = self.output.fmt
+        self.chk_inst = self.output.chk_inst
+        self.chk_gp = self.output.chk_gp
+        lay.addWidget(self.output)
 
         self.log = QPlainTextEdit()
+        self.log.setObjectName("log")
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(4000)
         self.log.setVisible(False)
-        self.log.setFixedHeight(140)
+        self.log.setFixedHeight(200)
         f = QFont("Menlo" if sys.platform == "darwin" else "Consolas")
         f.setStyleHint(QFont.Monospace)
         f.setPointSize(9)
         self.log.setFont(f)
         lay.addWidget(self.log)
+        lay.addStretch(1)
 
-        about = QAction("About", self)
-        about.triggered.connect(self._about)
-        self.menuBar().addMenu("Help").addAction(about)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setWidget(content)
+
+        self.panel = ProcessingPanel()
+        self.btn_start = self.panel.btn_start
+        self.btn_start.clicked.connect(self.start)
+        self.btn_cancel = self.panel.btn_cancel
+        self.btn_cancel.clicked.connect(self._cancel)
+        self.btn_log = self.panel.btn_log
+        self.btn_log.toggled.connect(self._show_log)
+        self.btn_open = self.panel.btn_open
+        self.btn_open.clicked.connect(self._open_output)
+
+        page = QWidget()
+        page.setObjectName("page")
+        pl = QVBoxLayout(page)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(0)
+        pl.addWidget(self.scroll, 1)
+        bottom = QVBoxLayout()
+        bottom.setContentsMargins(Spacing.XXL, Spacing.MD, Spacing.XXL, Spacing.LG + 4)
+        bottom.addWidget(self.panel)
+        pl.addLayout(bottom)
+        return page
+
+    def _show_log(self, on: bool):
+        self.log.setVisible(on)
+        if on:
+            QTimer.singleShot(0, lambda: self.scroll.ensureWidgetVisible(self.log))
 
     # -- settings -----------------------------------------------------------------------
     def _load_settings(self):
@@ -443,6 +423,7 @@ class MainWindow(QMainWindow):
         self.chk_inst.setChecked(self.settings.value("instrumental", "false") == "true")
         self.chk_gp.setChecked(self.settings.value("guitar_piano", "false") == "true")
         self.reserve.setCurrentIndex(max(0, self.reserve.findData(int(self.settings.value("memory_reserve_mb", 0)))))
+        self._on_options_changed()
 
     def _save_settings(self):
         self.settings.setValue("output_dir", self.out_edit.text())
@@ -452,6 +433,10 @@ class MainWindow(QMainWindow):
         self.settings.setValue("guitar_piano", "true" if self.chk_gp.isChecked() else "false")
         self.settings.setValue("memory_reserve_mb", self.reserve.currentData())
 
+    def _on_options_changed(self, *args):
+        self.output.quality_hint.setText(QUALITY_HINTS.get(self.quality.currentData(), ""))
+        self._update_ready_panel()
+
     # -- file list ----------------------------------------------------------------------
     def add_files(self, paths):
         existing = {self.list.item(i).data(self.ROLE_PATH) for i in range(self.list.count())}
@@ -459,13 +444,8 @@ class MainWindow(QMainWindow):
             p = str(Path(p).resolve())
             if p in existing:
                 continue
-            item = QListWidgetItem(f"⏳  {Path(p).name}")
-            item.setData(self.ROLE_PATH, p)
-            item.setData(self.ROLE_STATE, "queued")
-            item.setToolTip(p)
-            self.list.addItem(item)
+            self.list.add_entry(p)
             existing.add(p)
-        self.list.viewport().update()
         if self.list.count():
             self.engine.prewarm(self.quality.currentData(), self.reserve.currentData())
 
@@ -481,17 +461,33 @@ class MainWindow(QMainWindow):
             self.settings.setValue("last_input_dir", str(Path(files[0]).parent))
             self.add_files(files)
 
+    def _pick_folder(self):
+        """Like dropping a folder: every supported file inside it (recursively) is added."""
+        start = self.settings.value("last_input_dir", str(Path.home()))
+        folder = QFileDialog.getExistingDirectory(self, "Choose a folder of songs", start)
+        if not folder:
+            return
+        self.settings.setValue("last_input_dir", folder)
+        self.sidebar.select(self.PAGE_SPLIT)
+        paths = scan_paths([folder])
+        if not paths:
+            QMessageBox.information(self, APP_NAME, "No supported audio files were found in that folder.")
+            return
+        self.add_files(paths)
+
     def _remove_selected(self):
         if self._busy():
             return
         for item in self.list.selectedItems():
             self.list.takeItem(self.list.row(item))
-        self.list.viewport().update()
+
+    def _remove_item(self, item):
+        if not self._busy():
+            self.list.takeItem(self.list.row(item))
 
     def _clear(self):
         if not self._busy():
             self.list.clear()
-            self.list.viewport().update()
 
     def _pick_output(self):
         d = QFileDialog.getExistingDirectory(self, "Save stems to", self.out_edit.text())
@@ -502,6 +498,28 @@ class MainWindow(QMainWindow):
         p = Path(self.out_edit.text()).expanduser()
         p.mkdir(parents=True, exist_ok=True)
         open_folder(p)
+
+    def _on_queue_changed(self, *args):
+        self._panel_ready = True
+        self._refresh_summary()
+
+    def _refresh_summary(self):
+        states = [self.list.item(i).data(self.ROLE_STATE) for i in range(self.list.count())]
+        self.status_bar.set_summary(len(states), states.count("done"), states.count("running"), states.count("failed"))
+        self._update_ready_panel()
+
+    def _update_ready_panel(self):
+        """While idle (and no result to show) the panel sums up what Split Stems will do."""
+        if self._busy() or not self._panel_ready:
+            return
+        waiting = sum(1 for i in range(self.list.count())
+                      if self.list.item(i).data(self.ROLE_STATE) in ("queued", "failed"))
+        if waiting:
+            detail = f"{waiting} song{'s' if waiting != 1 else ''} to split · {self.quality.currentText()} · " \
+                     f"{self.fmt.currentText()}"
+        else:
+            detail = "Add songs, choose the output settings and press Split Stems."
+        self.panel.set_message("Ready to split", detail)
 
     # -- run ----------------------------------------------------------------------------
     def _busy(self) -> bool:
@@ -516,7 +534,7 @@ class MainWindow(QMainWindow):
             if self.list.item(i).data(self.ROLE_STATE) in ("queued", "failed")
         ]
         if not jobs:
-            QMessageBox.information(self, APP_NAME, "Add one or more songs first (drag & drop or “Add files…”).")
+            QMessageBox.information(self, APP_NAME, "Add one or more songs first (drag & drop or “Add Files”).")
             return
         out = Path(self.out_edit.text()).expanduser()
         try:
@@ -540,42 +558,67 @@ class MainWindow(QMainWindow):
         )
 
         for row, _ in jobs:
-            self._set_item(row, "queued", "⏳")
+            self._set_item(row, "queued", "queued")
+        self._timing.clear()
+        self._current_row = None
         self._set_running(True)
+        self.panel.show_song(jobs[0][1].name, "Starting…", 0.0, "")
         self._append_log(f"Starting {len(jobs)} file(s) → {out}")
         self.engine.run(jobs, opts)
 
     def _cancel(self):
         self.engine.cancel()
-        self.status.setText("Cancelling after the current step…")
-        self.btn_cancel.setEnabled(False)
+        self.panel.set_cancelling()
 
     def _set_running(self, running: bool):
         self.btn_start.setEnabled(not running)
         self.btn_cancel.setEnabled(running)
-        for w in (self.btn_add, self.btn_remove, self.btn_clear, self.quality, self.fmt, self.chk_inst, self.chk_gp,
-                  self.out_edit, self.reserve):
+        for w in (self.btn_add, self.btn_add_folder, self.batch_page.btn_folder, self.btn_remove, self.btn_clear,
+                  self.quality, self.fmt, self.chk_inst, self.chk_gp, self.out_edit, self.reserve):
             w.setEnabled(not running)
+        self.list.set_locked(running)
+        self.panel.set_running(running)
 
-    def _set_item(self, row: int, state: str, icon: str, extra: str = ""):
+    def _set_item(self, row: int, state: str, kind: str, detail: str = "", fraction: float = 0.0):
+        """`state` is the queue's (ROLE_STATE); `kind` is what the row shows (a cancelled song is "queued")."""
         item = self.list.item(row)
         if item is None:
             return
         item.setData(self.ROLE_STATE, state)
-        name = Path(item.data(self.ROLE_PATH)).name
-        item.setText(f"{icon}  {name}" + (f"   —   {extra}" if extra else ""))
+        widget = self.list.itemWidget(item)
+        if widget is not None:
+            widget.set_state(kind, detail, fraction)
+        self._refresh_summary()
+
+    def _time_left(self, row: int, frac: float, text: str) -> str:
+        """Estimated from this song's own progress rate; "" until there is enough to go on."""
+        now = time.monotonic()
+        if row not in self._timing or text.startswith(self.UNTIMED):
+            self._timing[row] = (now, frac)
+            return ""
+        t0, f0 = self._timing[row]
+        elapsed, progressed = now - t0, frac - f0
+        if elapsed < 5 or progressed < 0.02:
+            return ""
+        return format_duration(elapsed * (1 - frac) / progressed)
 
     @Slot(int, float, str)
     def _on_status(self, row: int, frac: float, text: str):
         item = self.list.item(row)
         name = Path(item.data(self.ROLE_PATH)).name if item else ""
-        self._set_item(row, "running", "▶️", f"{frac:.0%}")
-        self.progress.setValue(int(frac * 1000))
-        self.status.setText(f"{name}: {text}")
+        left = self._time_left(row, frac, text)
+        self._set_item(row, "running", "running", f"{frac:.0%}" + (f" · {left} remaining" if left else ""), frac)
+        # while song N is written, song N+1 is already separated: the panel follows the newest one
+        if self._current_row is None or row >= self._current_row:
+            self._current_row = row
+            eta = f"{left} remaining" if left else ("" if text.startswith(self.UNTIMED) else "Estimating time…")
+            self.panel.show_song(name, text, frac, eta)
+            if not self.btn_cancel.isEnabled():
+                self.panel.set_cancelling()
 
     @Slot(str)
     def _on_device(self, device: str):
-        self.device_label.setText(f"Processing on: {device}")
+        self.status_bar.set_device(device)
 
     @Slot(dict)
     def _on_memory(self, snap: dict):
@@ -583,56 +626,46 @@ class MainWindow(QMainWindow):
         text = f"Memory: {snap['used'] / gb:.1f} GB · limit {snap['budget'] / gb:.1f} GB"
         if snap.get("waiting"):
             text += " · waiting for free memory"
-        self.memory_label.setText(text)
+        self.status_bar.set_memory(text)
 
     def _on_worker_stopped(self):
-        self.memory_label.setText("")
+        self.status_bar.set_memory("")
         memlog("worker process stopped (GUI process)", self._append_log)
 
     @Slot(int, dict, float)
     def _on_done(self, row: int, stems: dict, seconds: float):
         mins, secs = divmod(int(seconds), 60)
-        self._set_item(row, "done", "✅", f"done in {mins}m {secs:02d}s")
+        self._set_item(row, "done", "done", f"done in {mins}m {secs:02d}s", 1.0)
         self._append_log("Saved:\n  " + "\n  ".join(stems.values()))
 
     @Slot(int, str)
     def _on_failed(self, row: int, message: str):
         if message == "Cancelled":
-            self._set_item(row, "queued", "⏹", "cancelled")
+            self._set_item(row, "queued", "cancelled", "resumes where it stopped")
             return
-        self._set_item(row, "failed", "⚠️", message.splitlines()[0][:120])
+        self._set_item(row, "failed", "failed", message.splitlines()[0][:120])
         self._append_log(f"ERROR: {message}")
 
     @Slot(bool)
     def _on_finished(self, cancelled: bool):
         self._set_running(False)
+        self._current_row = None
+        self._panel_ready = False
         done = sum(1 for i in range(self.list.count()) if self.list.item(i).data(self.ROLE_STATE) == "done")
         failed = sum(1 for i in range(self.list.count()) if self.list.item(i).data(self.ROLE_STATE) == "failed")
         if cancelled:
-            self.status.setText("Cancelled")
-            self.progress.setValue(0)
+            self.panel.set_message("Cancelled", "Press Split Stems to continue: each song resumes where it stopped.", 0)
         elif failed:
-            self.status.setText(f"Finished with {failed} error(s) — see the log")
-            if not self.log.isVisible():
+            self.panel.set_message(f"Finished with {failed} error(s) — see the log",
+                                   "Press Split Stems to retry only the songs that failed.")
+            if not self.btn_log.isChecked():
                 self.btn_log.setChecked(True)
         else:
-            self.status.setText(f"All done — {done} song(s) split")
-            self.progress.setValue(1000)
+            self.panel.set_message(f"All done — {done} song(s) split", f"Saved to {self.out_edit.text()}", 1000)
 
     @Slot(str)
     def _append_log(self, text: str):
         self.log.appendPlainText(text.rstrip())
-
-    def _about(self):
-        QMessageBox.about(
-            self,
-            f"About {APP_NAME}",
-            f"<b>{APP_NAME} {__version__}</b><br><br>"
-            "All stems: BS-RoFormer SW (jarredou)<br>"
-            "Maximum quality vocals: + MelBand-RoFormer (Kimberley Jensen)<br>"
-            "Powered by python-audio-separator, PyTorch and FFmpeg.<br><br>"
-            "Models are downloaded once on first use (~0.7 GB, +0.9 GB for Maximum).",
-        )
 
     def closeEvent(self, e):
         if self._busy():
@@ -650,42 +683,24 @@ class MainWindow(QMainWindow):
 
 
 # --------------------------------------------------------------------------------------
-STYLE = f"""
-QWidget {{ font-size: 13px; }}
-QLabel#title {{ font-size: 26px; font-weight: 700; }}
-QLabel#subtitle {{ color: #8a8aa0; margin-bottom: 4px; }}
-QLabel#status {{ font-weight: 600; }}
-QLabel#device {{ color: #8a8aa0; font-size: 12px; }}
-QListWidget#dropList {{
-    border: 2px dashed {ACCENT}; border-radius: 12px; padding: 8px;
-}}
-QListWidget#dropList::item {{ padding: 6px 4px; }}
-QFrame#card {{ border: 1px solid palette(midlight); border-radius: 10px; }}
-QPushButton {{
-    padding: 7px 14px; border-radius: 7px; border: 1px solid palette(mid); background: palette(button);
-}}
-QPushButton:hover {{ border-color: {ACCENT}; }}
-QPushButton:checked {{ background: palette(midlight); }}
-QPushButton:disabled {{ color: palette(mid); border-color: palette(midlight); }}
-QPushButton#primary {{
-    background: {ACCENT}; color: white; font-weight: 700; padding: 8px 22px; border: none;
-}}
-QPushButton#primary:disabled {{ background: #b9aefc; }}
-QPushButton#primary:hover {{ background: #6a48ff; }}
-QProgressBar {{ border: none; border-radius: 5px; background: palette(midlight); }}
-QProgressBar::chunk {{ border-radius: 5px; background: {ACCENT}; }}
-"""
-
-
 def run_gui() -> int:
     QApplication.setApplicationName(APP_NAME)
     QApplication.setOrganizationName(APP_NAME)
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    try:  # dark title bar on Windows 11 and dark native dialogs on macOS (Qt >= 6.8)
+        app.styleHints().setColorScheme(Qt.ColorScheme.Dark)
+    except AttributeError:
+        pass
+    pick_font_family()
+    app.setPalette(dark_palette())
+    font = QFont(Type.family)
+    font.setPixelSize(Type.BODY)
+    app.setFont(font)
     icon = resource_path("assets/icon.png")
     if icon.exists():
         app.setWindowIcon(QIcon(str(icon)))
-    app.setStyleSheet(STYLE)
+    app.setStyleSheet(stylesheet())
     win = MainWindow()
     win.show()
     return app.exec()
