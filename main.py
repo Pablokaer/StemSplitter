@@ -26,6 +26,9 @@ def run_cli(argv: list[str]) -> int:
     parser.add_argument("--wav", action="store_true", help="write 24-bit WAV instead of MP3")
     parser.add_argument("--instrumental", action="store_true", help="also write an Instrumental (no vocals) file")
     parser.add_argument("--guitar-piano", action="store_true", help="also split Guitar and Piano out of Other")
+    parser.add_argument("--reserve-mb", type=int, default=0,
+                        help="memory (MB) the system must keep free; the app slows down or waits instead "
+                             "of using it (default: automatic)")
     args = parser.parse_args(argv)
 
     last = {"pct": -1}
@@ -37,6 +40,8 @@ def run_cli(argv: list[str]) -> int:
             print(f"\r[{pct:3d}%] {text:<60}", end="", flush=True)
 
     engine = StemEngine(log=lambda m: print(f"\n  {m}"))
+    if args.reserve_mb > 0:
+        engine.gov.set_reserve(args.reserve_mb * 1024 * 1024)
     import torch
 
     if torch.cuda.is_available():
@@ -64,6 +69,9 @@ def run_cli(argv: list[str]) -> int:
     try:
         with ThreadPoolExecutor(max_workers=1) as writer:
             for f in args.files:
+                if pending is not None and engine.gov.level() != "relaxed":
+                    report(pending)  # one song at a time while memory is short
+                    pending = None
                 print(f"\n==> {f}")
                 separated = engine.split(f, opts, progress)
                 if pending is not None:
@@ -108,6 +116,11 @@ def run_selftest() -> int:
         if proc.exitcode != 0:
             proc.kill()
             raise RuntimeError(f"worker process exit code: {proc.exitcode}")
+        from stemsplitter.memgov import MemoryGovernor
+
+        gov = MemoryGovernor()  # psutil is bundled and can read the memory figures
+        if gov.available <= 0 or gov.used <= 0:
+            raise RuntimeError(f"memory governor read available={gov.available} used={gov.used}")
         report.write_text(
             f"OK torch={torch.__version__} cuda={torch.version.cuda} ffmpeg={ver.stdout.splitlines()[0]}\n"
         )

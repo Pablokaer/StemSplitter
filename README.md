@@ -90,7 +90,7 @@ When you add several songs, the next one is already being separated while the pr
 * The app shows which device it is using at the bottom of the window, and the log lists how long each step took.
 * `STEMSPLITTER_THREADS` (environment variable) pins the CPU thread count. On the test laptop the default was already the fastest, so only try it if CPU-only runs look slow.
 
-**Memory.** The window itself uses about 50 MB. The AI models run in a separate worker process that starts (and loads the model) as soon as you add songs, keeps the models loaded for the whole queue and quits 30 seconds after the queue is done, giving all of its memory (about 2 GB with PyTorch and the model) back to the system. Set `STEMSPLITTER_MEMLOG=1` to log the memory use of each step.
+**Memory.** StemSplitter never takes the memory your computer needs to stay responsive. It always leaves a reserve free (*Keep free for the system*: automatic, 2 GB on most machines, or 1–8 GB), uses what is left to go fast, and slows down or waits when other programs need the memory, showing "Waiting for free memory…". No work is lost: every song keeps a checkpoint, so a cancelled or crashed split continues where it stopped. The window itself uses about 50 MB; the AI models run in a separate worker process that quits 30 seconds after the queue is done and gives all of its memory back. Set `STEMSPLITTER_MEMLOG=1` to log the memory use of each step.
 On an NVIDIA GPU, *Maximum* keeps only the model that is running in video memory (the other one waits in RAM), so it also fits 4 GB GPUs.
 
 You can close the window and it asks before stopping a job that is still running.
@@ -108,7 +108,7 @@ python main.py --cli song1.mp3 song2.flac -o out_folder     # headless / batch
 python main.py --selftest          # the same check CI runs on the packaged app
 ```
 
-CLI options: `-q balanced|maximum|fast`, `-b 320` (MP3 bitrate), `--wav`, `--instrumental`, `--guitar-piano`.
+CLI options: `-q balanced|maximum|fast`, `-b 320` (MP3 bitrate), `--wav`, `--instrumental`, `--guitar-piano`, `--reserve-mb 2048` (memory to keep free for the system).
 
 Windows + NVIDIA from source (the PyPI `torch` wheel for Windows is CPU-only): after the install, run
 `pip install --force-reinstall --no-deps torch==<same version> --index-url https://download.pytorch.org/whl/cu130`.
@@ -124,6 +124,7 @@ main.py                         entry point (GUI, --cli, --selftest)
 stemsplitter/engine.py          separation pipeline (decode → RoFormer models → stems → MP3/WAV), all in memory
 stemsplitter/gui.py             PySide6 interface; starts and stops the worker process
 stemsplitter/worker.py          worker process: runs the queue on the engine, reports progress to the GUI
+stemsplitter/memgov.py          memory governor: keeps the app below what the system needs free
 stemsplitter/memory.py          memory logging (STEMSPLITTER_MEMLOG=1)
 stemsplitter/platform_utils.py  app folders, bundled ffmpeg, Windows/macOS quirks
 StemSplitter.spec               PyInstaller build recipe
@@ -139,6 +140,7 @@ tools/make_icon.py              generates the icons in assets/
 * **macOS 14 (Sonoma) or newer on Apple Silicon** is required. Intel Macs are not supported, because PyTorch no longer ships Intel-Mac builds.
 * **CPU-only is slow** (about 20–28 minutes for a 4-minute song). A GPU makes it roughly 20× faster.
 * On **4 GB GPUs**, other apps using the GPU at the same time can make a split several times slower (see *Tips for speed*).
+* There is a **memory floor** (PyTorch, one model and one chunk: ~1.2–1.5 GB of RAM measured on Windows with CUDA). Below that the app waits for memory instead of running. A song being split also needs up to ~0.3 GB of disk per minute until its files are written.
 * The *Windows-x64-CPU* CI job only builds on a manual run with the CPU-only option; otherwise it skips its steps and still shows as passed.
 * The apps are unsigned. For public distribution you would need an Apple Developer ID ($99/yr, plus notarization) and a Windows code-signing certificate.
 

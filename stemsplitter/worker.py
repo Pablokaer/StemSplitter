@@ -5,15 +5,20 @@ models once, splits the whole queue and is shut down shortly after the queue is 
 gui.EngineProcess). When a process exits the OS takes back all of its memory, including what
 PyTorch, CUDA and the C libraries keep cached, which `del model; gc.collect()` can't promise.
 
+The worker also runs the memory governor (memgov.py), which keeps it below the memory the
+system needs to stay responsive.
+
 Commands from the GUI (the `commands` queue):
-  ("prepare", quality)   load PyTorch and the preset's models ahead of time (only models already
-                         downloaded: a first-run download is shown with progress during a run)
-  ("run", jobs, opts)    split [(row, path)]
-  None                   exit
+  ("prepare", quality, reserve_mb)   load PyTorch and the preset's models ahead of time (only
+                                     models already downloaded, and only if they fit in the
+                                     memory budget: preloading never waits)
+  ("run", jobs, opts)                split [(row, path)]
+  None                               exit
 
 Messages to the GUI are tuples put on the `events` queue:
   ("status", row, fraction, text)   ("done", row, {stem: path}, seconds)   ("failed", row, message)
   ("log", text)   ("device", text)   ("prepared",)   ("finished", cancelled)
+  ("memory", {"used", "budget", "available", "reserve", "level", "waiting"})  about once a second while busy
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
+from .memgov import MB, MemoryGovernor
 from .memory import memlog
 
 Emit = Callable[..., None]
@@ -63,12 +69,15 @@ def run_jobs(engine, jobs: list[tuple[int, Path]], opts, cancel, emit: Emit) -> 
         return future.result() if future is not None else False
 
     cancelled = False
-    # Song N is encoded on a writer thread while song N+1 is being separated. At most one
-    # song waits to be written, so memory stays bounded to about two songs of stems.
+    # Song N is encoded on a writer thread while song N+1 is being separated, when memory allows
+    # it (the stems are in files, but the encoders still need some). At most one song waits.
     with ThreadPoolExecutor(max_workers=1) as writer:
         pending = None  # future of the song being written
         try:
             for row, path in jobs:
+                if pending is not None and engine.gov.level() != "relaxed":
+                    cancelled = wait(pending) or cancelled  # one song at a time while memory is short
+                    pending = None
                 if cancel.is_set():
                     cancelled = True
                     break
@@ -96,9 +105,13 @@ def _prepare(engine, quality: str, log) -> None:
     from .platform_utils import models_dir
 
     models = [m for m, _, _ in engine._models_for(get_preset(quality))]
-    if all((models_dir() / m).is_file() for m in models):
-        engine.prepare_models(lambda frac, text: None, quality=quality)
-        memlog("models preloaded", log)
+    if not all((models_dir() / m).is_file() for m in models):
+        return
+    if not engine.can_preload(quality):
+        log("Not preloading the model: memory is short right now (it loads when Split starts)")
+        return
+    engine.prepare_models(lambda frac, text: None, quality=quality)
+    memlog("models preloaded", log)
 
 
 def serve(commands, events, cancel) -> None:
@@ -114,6 +127,9 @@ def serve(commands, events, cancel) -> None:
         emit("log", text)
 
     memlog("worker started", log)
+    busy = False
+    governor = MemoryGovernor(log=log, report=lambda snap: emit("memory", snap) if busy else None)
+    governor.start()
     engine = None
 
     def get_engine():
@@ -121,7 +137,7 @@ def serve(commands, events, cancel) -> None:
         if engine is None:
             from .engine import StemEngine
 
-            engine = StemEngine(log=log)
+            engine = StemEngine(log=log, governor=governor)
             emit("device", describe_device())
         return engine
 
@@ -130,6 +146,7 @@ def serve(commands, events, cancel) -> None:
         if command is None:
             break
         if command[0] == "prepare":
+            governor.set_reserve(command[2] * MB)
             try:
                 _prepare(get_engine(), command[1], log)
             except Exception:  # not fatal: the run loads (or downloads) the models again
@@ -137,7 +154,9 @@ def serve(commands, events, cancel) -> None:
             emit("prepared")
             continue
         _, jobs, opts = command
+        governor.set_reserve(opts.memory_reserve_mb * MB)
         cancelled = False
+        busy = True
         try:
             if engine is None:
                 emit("status", jobs[0][0], 0.0, "Starting engine (loading PyTorch)...")
@@ -146,7 +165,9 @@ def serve(commands, events, cancel) -> None:
             emit("log", traceback.format_exc())
             if jobs:
                 emit("failed", jobs[0][0], f"Engine error: {exc}")
+        busy = False
         memlog("batch finished", log)
         emit("finished", cancelled)
+    governor.stop()
     if engine is not None:
         engine.close()
