@@ -1,0 +1,6 @@
+# Used by the lint job in .github/workflows/build.yml: only checks that catch real bugs
+# (syntax errors, undefined names, unused imports/variables), no style rules.
+target-version = "py311"
+
+[lint]
+select = ["E9", "F"]
