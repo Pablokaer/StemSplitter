@@ -90,6 +90,8 @@ When you add several songs, the next one is already being separated while the pr
 * The app shows which device it is using at the bottom of the window, and the log lists how long each step took.
 * `STEMSPLITTER_THREADS` (environment variable) pins the CPU thread count. On the test laptop the default was already the fastest, so only try it if CPU-only runs look slow.
 
+**Memory.** The window itself uses about 50 MB. The AI models run in a separate worker process that starts when you press *Split stems*, keeps the models loaded for the whole queue and quits 30 seconds after the queue is done, giving all of its memory (about 2 GB with PyTorch and the model) back to the system. Set `STEMSPLITTER_MEMLOG=1` to log the memory use of each step.
+
 You can close the window and it asks before stopping a job that is still running.
 
 ## Running from source (developers)
@@ -119,7 +121,9 @@ Lint (the same check as CI): `pip install ruff==0.16.9 && ruff check .`
 ```
 main.py                         entry point (GUI, --cli, --selftest)
 stemsplitter/engine.py          separation pipeline (decode → RoFormer models → stems → MP3/WAV), all in memory
-stemsplitter/gui.py             PySide6 interface and background worker
+stemsplitter/gui.py             PySide6 interface; starts and stops the worker process
+stemsplitter/worker.py          worker process: runs the queue on the engine, reports progress to the GUI
+stemsplitter/memory.py          memory logging (STEMSPLITTER_MEMLOG=1)
 stemsplitter/platform_utils.py  app folders, bundled ffmpeg, Windows/macOS quirks
 StemSplitter.spec               PyInstaller build recipe
 .github/workflows/build.yml     CI: lint, Windows + macOS builds, self-test, releases

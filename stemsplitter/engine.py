@@ -30,6 +30,7 @@ back to the CPU otherwise. On a GPU both models run in float16.
 from __future__ import annotations
 
 import atexit
+import gc
 import logging
 import os
 
@@ -54,6 +55,7 @@ from typing import Callable, Optional
 import numpy as np
 import soundfile as sf
 
+from .memory import memlog
 from .platform_utils import find_ffmpeg, models_dir, subprocess_flags
 
 STEM_MODEL = "BS-Roformer-SW.ckpt"  # 6 stems: bass, drums, other, vocals, guitar, piano
@@ -232,18 +234,21 @@ def _apply_thread_override() -> None:
 
 # --------------------------------------------------------------------------------------
 class StemEngine:
-    """Keeps models loaded between songs so batch processing is faster."""
+    """Keeps models loaded between songs so batch processing is faster.
+
+    One instance per model: the overlap is only read when demix() runs, so the presets share it.
+    """
 
     def __init__(self, log: Optional[LogFn] = None) -> None:
         self.log = log or (lambda msg: None)
         self.ffmpeg = find_ffmpeg()
-        self._separators: dict[str, object] = {}
+        self._separators: dict[str, object] = {}  # model file -> Separator
         self._work_dir = Path(tempfile.mkdtemp(prefix="stemsplitter_"))
         atexit.register(shutil.rmtree, self._work_dir, True)
         self._log_handler: Optional[logging.Handler] = None
 
     # -- helpers ------------------------------------------------------------------------
-    def _run_ffmpeg(self, args: list[str], stdin: Optional[bytes] = None) -> bytes:
+    def _run_ffmpeg(self, args: list[str], stdin=None) -> bytes:
         """Run ffmpeg; returns its stdout (the decoded audio when the output is "-")."""
         cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *args]
         proc = subprocess.run(cmd, input=stdin, capture_output=True, **subprocess_flags())
@@ -279,8 +284,7 @@ class StemEngine:
 
         # find_ffmpeg() already verified ffmpeg; the library's own check would flash a console on Windows.
         Separator.check_ffmpeg_installed = lambda self: None
-        key = f"{model}|{overlap}"
-        sep = self._separators.get(key)
+        sep = self._separators.get(model)
         if sep is None:
             sep = Separator(
                 log_level=logging.WARNING,
@@ -299,11 +303,28 @@ class StemEngine:
             logging.getLogger("audio_separator").setLevel(logging.INFO)
             self._attach_logging()
             sep.load_model(model_filename=model)
-            self._separators[key] = sep
+            self._separators[model] = sep
+            memlog(f"{model} loaded", self.log)
         sep.output_dir = str(out_dir)
         if getattr(sep, "model_instance", None) is not None:
             sep.model_instance.output_dir = str(out_dir)
+            sep.model_instance.overlap = overlap
         return sep
+
+    def _keep_only(self, preset: Preset) -> None:
+        """Unload models the preset doesn't use (e.g. the vocal model after leaving "maximum")."""
+        wanted = {model for model, _, _ in self._models_for(preset)}
+        stale = [m for m in self._separators if m not in wanted]
+        if not stale:
+            return
+        for m in stale:
+            del self._separators[m]
+        gc.collect()
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        memlog("unused models released", self.log)
 
     @staticmethod
     def _models_for(preset: Preset) -> list[tuple[str, int, str]]:
@@ -318,7 +339,9 @@ class StemEngine:
     ) -> None:
         """Download (first run only) and load the models the preset needs."""
         HUB.cancel_event = cancel
-        models = self._models_for(get_preset(quality))
+        preset = get_preset(quality)
+        self._keep_only(preset)
+        models = self._models_for(preset)
         for i, (model, overlap, label) in enumerate(models):
             base, span = i / len(models), 1 / len(models)
 
@@ -333,10 +356,14 @@ class StemEngine:
         HUB.on_bar = None
         progress(1.0, "Models ready")
 
-    def _run_model(self, model: str, overlap: int, mix: np.ndarray, label: str, report) -> dict[str, np.ndarray]:
+    def _run_model(
+        self, model: str, overlap: int, mix: np.ndarray, label: str, report, keep: set[str]
+    ) -> dict[str, np.ndarray]:
         """Run one model on `mix` (samples x channels, peak <= 1) in memory.
 
-        Returns {stem name (lower case): samples x channels}. Calling the model's demix()
+        Returns {stem name (lower case): samples x channels} for the stems in `keep` only: the
+        model's outputs are views of one big array, so copying just the needed ones and dropping
+        the rest frees it right away. Calling the model's demix()
         directly skips the library's WAV round trip (write the mix, read it back with librosa,
         write every stem, read them back): ~5 s and ~0.8 GB of disk traffic per song.
         """
@@ -355,7 +382,8 @@ class StemEngine:
         HUB.check_cancel()
         if isinstance(out, np.ndarray):  # single-target model without a residual
             out = {"vocals": out}
-        return {k.lower(): np.ascontiguousarray(v.T, dtype=np.float32) for k, v in out.items()}
+        memlog(f"{label} done", self.log)
+        return {k.lower(): np.ascontiguousarray(v.T, dtype=np.float32) for k, v in out.items() if k.lower() in keep}
 
     def _decode(self, input_path: Path) -> np.ndarray:
         """Decode any input to 44.1 kHz stereo float32 (samples x 2), piped straight into memory."""
@@ -375,6 +403,7 @@ class StemEngine:
             raise FileNotFoundError(f"File not found: {input_path}")
         HUB.cancel_event = cancel
         preset = get_preset(opts.quality)
+        self._keep_only(preset)
         timings: dict[str, float] = {}
         mark = time.time()
 
@@ -398,6 +427,7 @@ class StemEngine:
             # 1) decode ----------------------------------------------------------------------
             stage("decode")(0, "Decoding audio...")
             mix = self._decode(input_path)
+            memlog(f"{input_path.name} decoded", self.log)
             HUB.check_cancel()
             # Loud masters decode with peaks above 1.0. The models want a peak <= 1, so scale the
             # input down and the stems back up: "Other = mix - the rest" then stays exact. (Letting
@@ -408,29 +438,44 @@ class StemEngine:
             lap("decode")
 
             # 2) all stems in one pass ------------------------------------------------------------
-            sw = self._run_model(STEM_MODEL, preset.stem_overlap, model_in, "Separating stems", stage("stems"))
+            # (the model's own "other" is never used: Other is rebuilt below from the mix)
+            names = ["Vocals", "Drums", "Bass", *(EXTRA_STEMS if opts.guitar_piano else [])]
+            sw = self._run_model(STEM_MODEL, preset.stem_overlap, model_in, "Separating stems", stage("stems"),
+                                 keep={k.lower() for k in names})
             lap("stems")
-            vocals = sw["vocals"]
 
             # 3) maximum: average with a second, vocal-only model -----------------------------------
             if preset.vocal_overlap:
-                kim = self._run_model(VOCAL_MODEL, preset.vocal_overlap, model_in, "Refining vocals", stage("vocals"))
-                n = min(len(vocals), len(kim["vocals"]))
-                vocals = 0.5 * (vocals[:n] + kim["vocals"][:n])
+                kim = self._run_model(VOCAL_MODEL, preset.vocal_overlap, model_in, "Refining vocals",
+                                      stage("vocals"), keep={"vocals"})["vocals"]
+                n = min(len(sw["vocals"]), len(kim))
+                vocals = sw["vocals"][:n]
+                vocals += kim[:n]  # in place: same result as 0.5 * (vocals + kim), no temporaries
+                vocals *= 0.5
+                sw["vocals"] = vocals
+                del kim
                 lap("vocals")
             del model_in
 
             # 4) assemble ---------------------------------------------------------------------------
-            named = {"Vocals": vocals, "Drums": sw["drums"], "Bass": sw["bass"]}
-            if opts.guitar_piano:
-                named.update(Guitar=sw["guitar"], Piano=sw["piano"])
-            n = min(len(mix), *(len(a) for a in named.values()))
-            stems = {k: a[:n] / gain if gain != 1.0 else a[:n] for k, a in named.items()}
+            # Every array in `sw` belongs to this function, so it is trimmed and rescaled in place.
+            n = min(len(mix), *(len(a) for a in sw.values()))
+            stems = {k: sw.pop(k.lower())[:n] for k in names}
+            if gain != 1.0:
+                for a in stems.values():
+                    a /= gain
             # Other = everything not claimed by another stem, so the stems add up to the song exactly.
-            stems["Other"] = mix[:n] - sum(stems.values())
+            # Summed into one buffer (same order as sum(), so the same result) that then holds Other.
+            other = stems["Vocals"] + stems["Drums"]
+            for k in names[2:]:
+                other += stems[k]
+            np.subtract(mix[:n], other, out=other)
+            stems["Other"] = other
             stems = {k: stems[k] for k in [*STEM_ORDER, *EXTRA_STEMS] if k in stems}
             if opts.also_instrumental:
                 stems["Instrumental"] = mix[:n] - stems["Vocals"]
+            del mix
+            memlog("stems assembled", self.log)
             return Separated(input_path, stems, SAMPLE_RATE, timings, t0)
         finally:
             HUB.on_bar = None
@@ -457,6 +502,7 @@ class StemEngine:
             for i, fut in enumerate(as_completed(futures)):
                 fut.result()
                 progress(0.95 + 0.05 * (i + 1) / len(futures), f"Writing files... {i + 1}/{len(futures)}")
+        memlog(f"{song} written", self.log)
         timings = {**sep.timings, "encode": time.time() - t}
         result = Result(input_path=sep.input_path, stems=jobs, seconds=time.time() - sep.started)
         self.log(f"{song}: {result.seconds:.0f}s (" + ", ".join(f"{k} {v:.1f}s" for k, v in timings.items()) + ")")
@@ -471,6 +517,7 @@ class StemEngine:
 
     def close(self) -> None:
         self._separators.clear()
+        gc.collect()
         shutil.rmtree(self._work_dir, ignore_errors=True)
 
     # -- internals ------------------------------------------------------------------------
@@ -497,9 +544,12 @@ class StemEngine:
 
     def _write_stem(self, audio: np.ndarray, sr: int, out: Path, opts: Options, title: str) -> None:
         peak = float(np.max(np.abs(audio))) if audio.size else 0.0
-        if peak > 0.999:  # avoid clipping in the encoded file
-            audio = audio * (0.999 / peak)
         audio = np.ascontiguousarray(audio, dtype=np.float32)
+        if peak > 0.999:  # avoid clipping in the encoded file
+            if audio.flags.writeable:
+                audio *= 0.999 / peak  # in place: the stem is not needed after this
+            else:
+                audio = audio * (0.999 / peak)
         if opts.output_format == "wav":
             sf.write(out, audio, sr, subtype="PCM_24")
             return
@@ -521,7 +571,7 @@ class StemEngine:
                 f"title={title}",
                 str(out),
             ],
-            stdin=audio.tobytes(),
+            stdin=memoryview(audio).cast("B"),  # the samples' own buffer, no tobytes() copy
         )
 
 

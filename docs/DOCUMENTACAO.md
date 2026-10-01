@@ -96,6 +96,7 @@ Mostra o dispositivo, o progresso e onde cada stem foi gravado. Com várias mús
 - **Apple Silicon (Metal/MPS):** usado automaticamente no Mac. Operações raras sem suporte no MPS caem para a CPU (`PYTORCH_ENABLE_MPS_FALLBACK=1`).
 - **CPU:** usada só quando não há GPU compatível.
 - **`STEMSPLITTER_THREADS=N`:** fixa o número de threads da CPU, para testes.
+- **`STEMSPLITTER_MEMLOG=1`:** registra no log a RAM (e a VRAM, quando o PyTorch está carregado) em cada etapa: worker iniciado, áudio decodificado, modelo carregado, inferência concluída, stems montados, arquivos gravados, fila concluída e worker encerrado.
 
 ---
 
@@ -223,6 +224,18 @@ Tudo medido na RTX 3050:
 
 - **Uma GPU, um trabalho por vez.** Duas inferências simultâneas numa GPU de 4 GB disputam a VRAM, o Windows começa a usar a RAM do sistema e tudo fica **várias vezes mais lento**. Isso foi observado com outra instância do app aberta: até 8× mais lento.
 - **Pipelining limitado:** no máximo uma música esperando gravação, então a RAM nunca guarda mais que duas músicas de stems. Uma música de 5 min com a mistura e 4 stems em float32 ocupa ~0,5 GB; o pico medido do processo foi ~3,1 GiB, incluindo PyTorch e o modelo.
+- **A IA roda num processo separado (worker).** A janela não importa o PyTorch e usa ~50 MB. O worker é criado no *Split stems*, carrega o modelo uma vez para a fila inteira e encerra 30 s depois que a fila termina (`EngineProcess.IDLE_SECONDS`). Só o fim do processo devolve com certeza ao sistema a memória do PyTorch, do CUDA e das bibliotecas C: no mesmo processo, mesmo depois de `engine.close()`, ficavam ~2,1 GB residentes.
+- **Uma instância por modelo.** O overlap é só um atributo lido a cada `demix()`, então Balanced e Fast compartilham o mesmo BS-RoFormer. Ao sair do Maximum, o MelBand-RoFormer é descarregado. Antes, alternar entre os presets deixava até 3 instâncias carregadas.
+- **Menos cópias dos arrays:** só os stems usados são copiados da saída do modelo (o "other" do modelo e, sem a opção, guitar e piano são descartados); a média do Maximum, o ganho das músicas altas e o Other são calculados no próprio buffer; o ffmpeg recebe o buffer do stem direto, sem `tobytes()`. A saída continua bit a bit idêntica.
+
+Medido (RTX 3050 Laptop, música de 5:21, Balanced, WAV + Instrumental):
+
+| | Antes | Depois |
+|---|---|---|
+| Janela parada | ~53 MB | ~53 MB |
+| Pico de RAM do split | 3,81 GB | 3,46 GB |
+| RAM depois da fila | ~2,1 GB (retida até fechar o app) | ~60 MB (30 s depois, o worker encerra) |
+| Balanced → Fast → Maximum → Balanced no mesmo engine | 3 instâncias, 2,30 GB | 1 instância, 1,67 GB |
 - **Na CPU,** a inferência domina ainda mais: ~3,3× o tempo real por passada.
 
 ---
@@ -235,7 +248,9 @@ Tudo medido na RTX 3050:
 |---|---|
 | `main.py` | Ponto de entrada: janela (padrão), `--cli` e `--selftest` |
 | `stemsplitter/engine.py` | Todo o pipeline de áudio: presets, modelos, decodificação, separação, montagem dos stems e gravação |
-| `stemsplitter/gui.py` | Interface PySide6: janela, fila, configurações e o `Worker` em segundo plano |
+| `stemsplitter/gui.py` | Interface PySide6: janela, fila, configurações e o `EngineProcess`, que inicia e encerra o worker |
+| `stemsplitter/worker.py` | Processo worker: executa a fila no engine e envia progresso, logs e resultados para a GUI |
+| `stemsplitter/memory.py` | Medição de memória para depuração (`STEMSPLITTER_MEMLOG=1`) |
 | `stemsplitter/platform_utils.py` | Pastas de dados, ffmpeg embutido, ajustes do app empacotado, abrir pasta |
 | `stemsplitter/__init__.py` | Nome e versão do app |
 | `StemSplitter.spec` | Receita do PyInstaller |
@@ -288,20 +303,22 @@ engine.close()
 ```
 
 - `Preset(stem_overlap, vocal_overlap)` define cada preset; `get_preset()` resolve nomes e apelidos.
-- `progress(frac, texto)` recebe de 0 a 1 o andamento geral; `cancel` é um `threading.Event`.
+- `progress(frac, texto)` recebe de 0 a 1 o andamento geral; `cancel` é qualquer objeto com `is_set()` (`threading.Event` ou `multiprocessing.Event`).
 - `Cancelled` é a exceção levantada quando o usuário cancela.
 
-### 5.4 Modelo de threads
+### 5.4 Modelo de processos e threads
 
-| Thread | O que faz |
+| Onde | O que faz |
 |---|---|
-| Principal (Qt) | Janela e eventos; recebe sinais |
-| `QThread` do `Worker` | `engine.split()` de cada música (decodificação e inferência na GPU/CPU) |
-| *Writer* (1 thread) | `engine.write_stems()` da música anterior e o sinal de concluída |
-| *Pool* de encoders (até N threads) | Um processo ffmpeg/LAME por stem |
+| Processo da GUI, thread principal (Qt) | Janela e eventos; o `EngineProcess` lê a fila de eventos do worker a cada 50 ms e os repassa como sinais |
+| Processo worker, thread principal (`worker.serve`) | `engine.split()` de cada música (decodificação e inferência na GPU/CPU) |
+| Processo worker, *writer* (1 thread) | `engine.write_stems()` da música anterior e o evento de concluída |
+| Processo worker, *pool* de encoders (até N threads) | Um processo ffmpeg/LAME por stem |
 
-- **Comunicação:** só por sinais Qt (`status`, `file_done`, `file_failed`, `log`, `device`, `finished`), entregues na ordem de emissão.
-- **Cancelamento:** o `cancel` é verificado entre blocos de inferência (pelo gancho de progresso) e antes de cada arquivo gravado.
+- **Comunicação:** duas `multiprocessing.Queue` (contexto *spawn*): comandos `(jobs, opts)` ou `None` (encerrar) para o worker, e eventos `status`, `done`, `failed`, `log`, `device` e `finished` de volta, entregues na ordem de emissão. Atualizações de progresso seguidas da mesma música são agrupadas.
+- **Ciclo de vida:** o worker é criado no primeiro *Split stems*, reaproveitado por qualquer fila iniciada nos 30 s seguintes e encerrado depois disso ou ao fechar a janela. Se o processo morrer no meio (falta de memória, falha de driver), as músicas restantes aparecem como falha e a janela continua funcionando.
+- **Cancelamento:** um `multiprocessing.Event` compartilhado, verificado entre blocos de inferência (pelo gancho de progresso) e antes de cada arquivo gravado.
+- **Empacotado:** o worker é o próprio executável, iniciado pelo `multiprocessing.freeze_support()` em `main.py`. O `--selftest` do CI inicia e encerra um worker para garantir isso.
 
 ### 5.5 Progresso e cancelamento
 
