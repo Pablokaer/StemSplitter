@@ -6,8 +6,10 @@ Pipeline (streamed through files in the song's work folder, see _Work and _Track
      guitar, piano and other.
   3. "maximum" only: MelBand-RoFormer (Kimberley Jensen) also isolates the vocals and the
      two vocal estimates are averaged (ensembling two strong models beats either one).
-  4. Other = mix - (vocals + drums + bass [+ guitar + piano]), so the stems always add up to
-     the original song exactly. Then all stems are encoded to MP3 (320 kbps by default) in
+  4. Other = mix - (vocals + drums + bass [+ guitar] [+ piano]), so the stems always add up
+     to the original song exactly. Instrumental = mix - Vocals and No Drums = mix - Drums (the
+     song with only the drums taken out). Only the outputs picked in Options.stems are built
+     (and only the model stems they need), then encoded to MP3 (320 kbps by default) in
      parallel. split() and write_stems() are separate so a batch can encode one song while
      the next one is on the GPU.
 
@@ -73,8 +75,19 @@ STEM_MODEL = "BS-Roformer-SW.ckpt"  # 6 stems: bass, drums, other, vocals, guita
 VOCAL_MODEL = "vocals_mel_band_roformer.ckpt"
 SAMPLE_RATE = 44100
 
-STEM_ORDER = ["Vocals", "Drums", "Bass", "Other"]
-EXTRA_STEMS = ["Guitar", "Piano"]
+# Every file the app can write per song, in this order, and the model stems each is built from.
+OUTPUTS = {
+    "Vocals": {"Vocals"},
+    "Drums": {"Drums"},
+    "Bass": {"Bass"},
+    "Other": {"Vocals", "Drums", "Bass"},  # mix - the rest (also minus Guitar / Piano when those are written)
+    "Guitar": {"Guitar"},
+    "Piano": {"Piano"},
+    "Instrumental": {"Vocals"},  # mix - Vocals
+    "No Drums": {"Drums"},  # mix - Drums: the song with only the drums taken out
+}
+MODEL_STEMS = ["Vocals", "Drums", "Bass", "Guitar", "Piano"]  # the stem model's outputs that are used
+DEFAULT_STEMS = ("Vocals", "Drums", "Bass", "Other")
 BLOCK_FRAMES = SAMPLE_RATE * 10  # 10 s: the unit for decoding, assembling and encoding (~3.5 MB per stem)
 WORK_VERSION = 1  # bump when the work-folder layout changes (old checkpoints are then ignored)
 CHECKPOINT_SECONDS = 15
@@ -121,11 +134,32 @@ class Options:
     output_dir: Path
     bitrate_kbps: int = 320
     quality: str = DEFAULT_QUALITY
-    also_instrumental: bool = False
+    stems: tuple[str, ...] = DEFAULT_STEMS  # the files to write (names from OUTPUTS)
+    also_instrumental: bool = False  # older switches, added to `stems` (for scripts that still use them)
     guitar_piano: bool = False  # also split Guitar and Piano out of Other
     output_format: str = "mp3"  # "mp3" or "wav"
     memory_reserve_mb: int = 0  # memory the system must keep free; 0 = automatic (see memgov.py)
     ignore_memory_limit: bool = False  # True: the governor never waits or holds back (see memgov.py)
+
+    def outputs(self) -> list[str]:
+        """The files to write, in OUTPUTS order."""
+        wanted = set(self.stems)
+        if self.also_instrumental:
+            wanted.add("Instrumental")
+        if self.guitar_piano:
+            wanted |= {"Guitar", "Piano"}
+        unknown = wanted - OUTPUTS.keys()
+        if unknown:
+            raise ValueError(f"Unknown stem(s): {', '.join(sorted(unknown))}")
+        if not wanted:
+            raise ValueError("Choose at least one stem to write")
+        return [k for k in OUTPUTS if k in wanted]
+
+
+def model_stems(outputs: list[str]) -> list[str]:
+    """The stem model's outputs that `outputs` are built from, in MODEL_STEMS order."""
+    needed = set().union(*(OUTPUTS[k] for k in outputs))
+    return [k for k in MODEL_STEMS if k in needed]
 
 
 @dataclass
@@ -372,8 +406,8 @@ class _Work:
 
 def _song_key(path: Path, opts: Options) -> str:
     st = path.stat()
-    ident = [str(path.resolve()), st.st_size, st.st_mtime_ns, get_preset(opts.quality), opts.guitar_piano,
-             opts.also_instrumental, WORK_VERSION]
+    ident = [str(path.resolve()), st.st_size, st.st_mtime_ns, get_preset(opts.quality), opts.outputs(),
+             WORK_VERSION]
     return hashlib.sha1(repr(ident).encode()).hexdigest()[:16]
 
 
@@ -807,6 +841,10 @@ class StemEngine:
             raise FileNotFoundError(f"File not found: {input_path}")
         HUB.cancel_event = cancel
         preset = get_preset(opts.quality)
+        outputs = opts.outputs()
+        # (the model's own "other" is never used: Other is rebuilt from the mix)
+        names = model_stems(outputs)
+        refine_vocals = bool(preset.vocal_overlap) and "Vocals" in names  # no output needs vocals: skip that model
         self._keep_only(preset)
         work = _Work(self._songs_dir, _song_key(input_path, opts))
         st = work.state
@@ -821,7 +859,7 @@ class StemEngine:
 
         try:
             # Weighted stages -> one smooth overall progress value (the vocal pass is ~3/4 of the stem pass).
-            if preset.vocal_overlap:
+            if refine_vocals:
                 stages = {"decode": (0.00, 0.02), "stems": (0.02, 0.55), "vocals": (0.55, 0.93), "mix": (0.93, 0.95)}
             else:
                 stages = {"decode": (0.00, 0.02), "stems": (0.02, 0.93), "mix": (0.93, 0.95)}
@@ -836,7 +874,7 @@ class StemEngine:
             else:
                 stage("decode")(0, "Decoding audio...")
                 frames, peak = self._decode(input_path, work)
-                self._check_disk(work, frames, opts)
+                self._check_disk(work, frames, len(names) + refine_vocals + len(outputs))
                 work.save(frames=frames, peak=peak)
             memlog(f"{input_path.name} decoded", self.log)
             # Loud masters decode with peaks above 1.0. The models want a peak <= 1, so scale the
@@ -846,8 +884,6 @@ class StemEngine:
             lap("decode")
 
             # 2) all stems in one pass ------------------------------------------------------------
-            # (the model's own "other" is never used: Other is rebuilt below from the mix)
-            names = ["Vocals", "Drums", "Bass", *(EXTRA_STEMS if opts.guitar_piano else [])]
             if not st.get("assembled"):
                 if not (st.get("stems") or {}).get("done"):
                     self._stream_model(STEM_MODEL, preset.stem_overlap, work, frames, gain,
@@ -856,19 +892,16 @@ class StemEngine:
                 lap("stems")
 
                 # 3) maximum: a second, vocal-only model, averaged in below ---------------------------
-                if preset.vocal_overlap and not (st.get("vocals") or {}).get("done"):
+                if refine_vocals and not (st.get("vocals") or {}).get("done"):
                     self._stream_model(VOCAL_MODEL, preset.vocal_overlap, work, frames, gain,
                                        {"vocals": "mel_Vocals"}, "vocals", "Refining vocals", stage("vocals"))
                     lap("vocals")
 
                 # 4) assemble -----------------------------------------------------------------------
                 stage("mix")(0, "Assembling stems...")
-                self._assemble(work, frames, names, gain, bool(preset.vocal_overlap), opts.also_instrumental)
+                self._assemble(work, frames, names, outputs, gain, refine_vocals)
                 work.drop(*(f"sw_{k}" for k in names), "mel_Vocals")
-            order = [k for k in [*STEM_ORDER, *EXTRA_STEMS] if k in [*names, "Other"]]
-            if opts.also_instrumental:
-                order.append("Instrumental")
-            stems = {k: work.array(f"out_{k}", frames, "r") for k in order}
+            stems = {k: work.array(f"out_{k}", frames, "r") for k in outputs}
             memlog("stems assembled", self.log)
             return Separated(input_path, stems, SAMPLE_RATE, timings, t0, work=work,
                              peaks=dict(work.state.get("peaks", {})))
@@ -876,26 +909,26 @@ class StemEngine:
             HUB.on_bar = None
             self._active_model = None
 
-    def _check_disk(self, work: _Work, frames: int, opts: Options) -> None:
-        files = 2 * (5 + bool(opts.guitar_piano) * 2 + bool(opts.also_instrumental) + 2)  # inputs + outputs, generous
+    def _check_disk(self, work: _Work, frames: int, tracks: int) -> None:
+        files = 2 * (tracks + 1)  # model outputs + final stems + the mix, doubled to be generous
         need = frames * 8 * files + 200 * MB
         free = shutil.disk_usage(work.dir).free
         if free < need:
             raise RuntimeError(f"Not enough free disk space: {need / GB:.1f} GB needed in {work.dir.parent}, "
                                f"{free / GB:.1f} GB free")
 
-    def _assemble(self, work: _Work, frames: int, names: list[str], gain: float, maximum: bool,
-                  instrumental: bool) -> None:
-        """Build the final stems block by block (same operations, in the same order, as in memory).
+    def _assemble(self, work: _Work, frames: int, names: list[str], finals: list[str], gain: float,
+                  maximum: bool) -> None:
+        """Build the `finals` block by block (same operations, in the same order, as in memory).
 
-        Vocals = average of the two models in "maximum"; every stem / gain; Other = mix - the
-        rest; Instrumental = mix - Vocals. Also records each stem's peak for clipping protection.
+        `names` are the model stems (see model_stems()). Vocals = average of the two models in
+        "maximum"; every stem / gain; Other = mix - the rest; Instrumental = mix - Vocals; No
+        Drums = mix - Drums. Also records each stem's peak for clipping protection.
         The inputs are not modified, so an interrupted assembly simply runs again.
         """
         mix = work.array("mix", frames, "r")
         src = {k: work.array(f"sw_{k}", frames, "r") for k in names}
         mel = work.array("mel_Vocals", frames, "r") if maximum else None
-        finals = [*names, "Other", *(["Instrumental"] if instrumental else [])]
         out = {k: work.array(f"out_{k}", frames, "w+") for k in finals}
         peaks = dict.fromkeys(finals, 0.0)
         for i in range(0, frames, BLOCK_FRAMES):
@@ -908,16 +941,19 @@ class StemEngine:
             if gain != 1.0:
                 for a in block.values():
                     a /= gain
-            # Other = everything not claimed by another stem, so the stems add up to the song exactly.
-            # Summed in the same order as sum(), so the same result.
-            other = block["Vocals"] + block["Drums"]
-            for k in names[2:]:
-                other += block[k]
             m = mix[i:j]
-            np.subtract(m, other, out=other)
-            block["Other"] = other
-            if instrumental:
+            if "Other" in finals:
+                # Other = everything not claimed by another stem, so the stems add up to the song exactly.
+                # Summed in the same order as sum(), so the same result (names starts with Vocals, Drums).
+                other = block["Vocals"] + block["Drums"]
+                for k in names[2:]:
+                    other += block[k]
+                np.subtract(m, other, out=other)
+                block["Other"] = other
+            if "Instrumental" in finals:
                 block["Instrumental"] = m - block["Vocals"]
+            if "No Drums" in finals:
+                block["No Drums"] = m - block["Drums"]
             for k in finals:
                 out[k][i:j] = block[k]
                 if j > i:

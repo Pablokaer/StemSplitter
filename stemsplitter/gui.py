@@ -62,6 +62,19 @@ QUALITIES = [
     ("Maximum (cleanest vocals, about 1.8× slower)", "maximum"),
     ("Fast (about 1.8× faster, a little more bleed)", "fast"),
 ]
+# (engine output name, checkbox text, tooltip), in the engine's OUTPUTS order
+STEMS = [
+    ("Vocals", "Vocals", "Lead and backing vocals"),
+    ("Drums", "Drums", "Drum kit and percussion"),
+    ("Bass", "Bass", "Bass guitar, synth bass, 808"),
+    ("Other", "Other (melody)", "Everything else: guitars, keys, synths, strings… "
+                                "(without Guitar and Piano when those are ticked too)"),
+    ("Guitar", "Guitar", "Split out of Other"),
+    ("Piano", "Piano (keys)", "Split out of Other"),
+    ("Instrumental", "Instrumental (no vocals)", "The whole song without the vocals"),
+    ("No Drums", "No Drums (song without drums)", "The whole song with only the drums taken out"),
+]
+DEFAULT_STEMS = ["Vocals", "Drums", "Bass", "Other"]
 QUALITY_HINTS = {
     "balanced": "The best balance between separation quality and speed.",
     "maximum": "Adds a second vocal model for the cleanest vocals. Takes longer.",
@@ -339,7 +352,8 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(Spacing.XXL, Spacing.XXL - 4, Spacing.XXL, Spacing.XL)
         lay.setSpacing(Spacing.XL)
         lay.addWidget(page_header("Split Audio into Stems",
-                                  "Separate any song into Vocals, Drums, Bass, and Other, one MP3 per stem."))
+                                  "Separate any song into the stems you pick: vocals, drums, bass, melody, guitar, piano, "
+                                  "or the whole song without vocals or without drums."))
 
         self.drop = DropZone()
         self.drop.files_dropped.connect(self.add_files)
@@ -359,13 +373,14 @@ class MainWindow(QMainWindow):
         self.btn_clear.clicked.connect(self._clear)
         lay.addWidget(self.queue)
 
-        self.output = OutputSettings(QUALITIES, FORMATS)
+        self.output = OutputSettings(QUALITIES, FORMATS, STEMS)
         self.out_edit = self.output.out_edit
         self.output.btn_browse.clicked.connect(self._pick_output)
         self.quality = self.output.quality
         self.fmt = self.output.fmt
-        self.chk_inst = self.output.chk_inst
-        self.chk_gp = self.output.chk_gp
+        self.stem_checks = self.output.stem_checks
+        for chk in self.stem_checks.values():
+            chk.toggled.connect(self._on_options_changed)
         lay.addWidget(self.output)
 
         self.log = QPlainTextEdit()
@@ -421,8 +436,17 @@ class MainWindow(QMainWindow):
         idx = self.quality.findData(self.settings.value("quality", "balanced"))
         self.quality.setCurrentIndex(max(0, idx))
         self.fmt.setCurrentIndex(int(self.settings.value("format_idx", 0)))
-        self.chk_inst.setChecked(self.settings.value("instrumental", "false") == "true")
-        self.chk_gp.setChecked(self.settings.value("guitar_piano", "false") == "true")
+        saved = str(self.settings.value("stems", "") or "")
+        if saved:
+            stems = saved.split(",")
+        else:  # versions before the stem picker: 4 stems plus the two extra switches
+            stems = [*DEFAULT_STEMS]
+            if self.settings.value("instrumental", "false") == "true":
+                stems.append("Instrumental")
+            if self.settings.value("guitar_piano", "false") == "true":
+                stems += ["Guitar", "Piano"]
+        for name, chk in self.stem_checks.items():
+            chk.setChecked(name in stems)
         self.reserve.setCurrentIndex(max(0, self.reserve.findData(int(self.settings.value("memory_reserve_mb", 0)))))
         self.chk_unlimited.setChecked(self.settings.value("ignore_memory_limit", "true") == "true")  # on by default
         self._on_options_changed()
@@ -431,10 +455,13 @@ class MainWindow(QMainWindow):
         self.settings.setValue("output_dir", self.out_edit.text())
         self.settings.setValue("quality", self.quality.currentData())
         self.settings.setValue("format_idx", self.fmt.currentIndex())
-        self.settings.setValue("instrumental", "true" if self.chk_inst.isChecked() else "false")
-        self.settings.setValue("guitar_piano", "true" if self.chk_gp.isChecked() else "false")
+        if self._selected_stems():  # with none ticked, the last choice is kept
+            self.settings.setValue("stems", ",".join(self._selected_stems()))
         self.settings.setValue("memory_reserve_mb", self.reserve.currentData())
         self.settings.setValue("ignore_memory_limit", "true" if self.chk_unlimited.isChecked() else "false")
+
+    def _selected_stems(self) -> list[str]:
+        return [name for name, chk in self.stem_checks.items() if chk.isChecked()]
 
     def _on_options_changed(self, *args):
         self.output.quality_hint.setText(QUALITY_HINTS.get(self.quality.currentData(), ""))
@@ -519,8 +546,9 @@ class MainWindow(QMainWindow):
         waiting = sum(1 for i in range(self.list.count())
                       if self.list.item(i).data(self.ROLE_STATE) in ("queued", "failed"))
         if waiting:
-            detail = f"{waiting} song{'s' if waiting != 1 else ''} to split · {self.quality.currentText()} · " \
-                     f"{self.fmt.currentText()}"
+            n = len(self._selected_stems())
+            detail = f"{waiting} song{'s' if waiting != 1 else ''} to split · {n} file{'s' if n != 1 else ''} " \
+                     f"per song · {self.quality.currentText()} · {self.fmt.currentText()}"
         else:
             detail = "Add songs, choose the output settings and press Split Stems."
         self.panel.set_message("Ready to split", detail)
@@ -540,6 +568,9 @@ class MainWindow(QMainWindow):
         if not jobs:
             QMessageBox.information(self, APP_NAME, "Add one or more songs first (drag & drop or “Add Files”).")
             return
+        if not self._selected_stems():
+            QMessageBox.information(self, APP_NAME, "Tick at least one stem to extract in Output Settings.")
+            return
         out = Path(self.out_edit.text()).expanduser()
         try:
             out.mkdir(parents=True, exist_ok=True)
@@ -555,8 +586,7 @@ class MainWindow(QMainWindow):
             output_dir=out,
             bitrate_kbps=br or 320,
             quality=self.quality.currentData(),
-            also_instrumental=self.chk_inst.isChecked(),
-            guitar_piano=self.chk_gp.isChecked(),
+            stems=tuple(self._selected_stems()),
             output_format=fmt,
             memory_reserve_mb=self.reserve.currentData(),
             ignore_memory_limit=self.chk_unlimited.isChecked(),
@@ -579,7 +609,7 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(not running)
         self.btn_cancel.setEnabled(running)
         for w in (self.btn_add, self.btn_add_folder, self.batch_page.btn_folder, self.btn_remove, self.btn_clear,
-                  self.quality, self.fmt, self.chk_inst, self.chk_gp, self.out_edit, self.chk_unlimited):
+                  self.quality, self.fmt, *self.stem_checks.values(), self.out_edit, self.chk_unlimited):
             w.setEnabled(not running)
         self.reserve.setEnabled(not running and not self.chk_unlimited.isChecked())
         self.list.set_locked(running)

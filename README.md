@@ -10,8 +10,11 @@ A desktop app for **Windows and macOS** that takes a song (MP3, WAV, FLAC, M4A, 
 | **Drums** | Kit, percussion |
 | **Bass** | Bass guitar, synth bass, 808s |
 | **Other** | Everything else: the melody and harmony (guitars, keys, synths, strings, …) |
-| **Guitar**, **Piano** *(optional)* | Split out of Other when you want 6 stems |
-| **Instrumental** *(optional)* | Everything except the vocals |
+| **Guitar**, **Piano** | Split out of Other when you want 6 stems |
+| **Instrumental** | Everything except the vocals |
+| **No Drums** | The whole song with only the drums removed |
+
+You tick which of these to write, from a single one (for example only **No Drums**, to play drums along) up to all eight. The default is Vocals, Drums, Bass and Other.
 
 ## Features
 
@@ -63,7 +66,7 @@ The apps are built for you by GitHub Actions (free), because a Windows build has
 ## Using it
 
 1. Drag songs (or a whole folder) onto the drop area, or click **Add Files** or **Add Folder**.
-2. In **Output Settings**, choose where to save, the quality, the format, and optionally the Instrumental track and the Guitar/Piano stems. Each song gets its own subfolder: `Song - Vocals.mp3`, `Song - Drums.mp3`, `Song - Bass.mp3`, `Song - Other.mp3`
+2. In **Output Settings**, choose where to save, the quality, the format, and under **Stems to extract** tick the stems you want: Vocals, Drums, Bass, Other (melody), Guitar, Piano (keys), Instrumental (no vocals) and No Drums (the song without drums). Each song gets its own subfolder with one file per ticked stem: `Song - Vocals.mp3`, `Song - Drums.mp3`, `Song - Bass.mp3`, `Song - Other.mp3`, …
 3. Click **Split Stems**. The processing card at the bottom shows the song being split, its progress and the time left, with a **Cancel** button. If some songs fail, click **Split Stems** again to retry only those.
 
 *Show log* and *Open output folder* are next to the Split Stems button. The memory reserve (*Keep free for the system*) and *Ignore the memory limit* are on the **Settings** page; **About** has the version and the models.
@@ -110,7 +113,7 @@ python main.py --cli song1.mp3 song2.flac -o out_folder     # headless / batch
 python main.py --selftest          # the same check CI runs on the packaged app
 ```
 
-CLI options: `-q balanced|maximum|fast`, `-b 320` (MP3 bitrate), `--wav`, `--instrumental`, `--guitar-piano`, `--reserve-mb 2048` (memory to keep free for the system), `--no-memory-limit` (ignore the memory limit).
+CLI options: `-q balanced|maximum|fast`, `-b 320` (MP3 bitrate), `--wav`, `--stems vocals,drums,bass,other` (which files to write: `vocals`, `drums`, `bass`, `other`/`melody`, `guitar`, `piano`/`keys`, `instrumental`, `no-drums`, or `all`; for example `--stems no-drums` writes only the song without drums), `--instrumental`, `--guitar-piano`, `--reserve-mb 2048` (memory to keep free for the system), `--no-memory-limit` (ignore the memory limit).
 
 Windows + NVIDIA from source (the PyPI `torch` wheel for Windows is CPU-only): after the install, run
 `pip install --force-reinstall --no-deps torch==<same version> --index-url https://download.pytorch.org/whl/cu130`.
