@@ -4,7 +4,9 @@
     python benchmarks/golden.py compare golden.json   # after it: every file must hash the same
 
 The clip is synthetic (tones, noise and clicks, peak 1.3 so the loud-input gain path runs too), 12 s long so it
-takes the normal chunked path (clips under 10 s take the library's short-audio path). Set
+takes the normal chunked path (clips under 10 s take the library's short-audio path). Two copies of the clip
+also go through the worker's batch pipeline, and each must hash like the single run of the same configuration.
+Set
 STEMSPLITTER_GOLDEN_DEVICE=cpu to hide the GPU (deterministic and independent of the GPU's clocks); the default
 uses whatever the engine picks. Work folders go to a temporary directory, never to the app's own work/ folder,
 so a checkpoint left by older code can't leak into the comparison.
@@ -40,6 +42,7 @@ CASES = [  # (name, quality, stems, format)
     ("fast-4stems-mp3", "fast", ("Vocals", "Drums", "Bass", "Other"), "mp3"),
     ("maximum-nodrums-wav", "maximum", ("No Drums",), "wav"),
 ]
+BATCH_OF = "balanced-all8-wav"
 
 
 def make_clip(path: Path, seconds: float = 12.0) -> None:
@@ -72,6 +75,29 @@ def run(out_root: Path) -> dict:
             res = engine.separate(clip, opts, lambda f, s: None)
             hashes[name] = {k: hashlib.sha256(Path(p).read_bytes()).hexdigest() for k, p in sorted(res.stems.items())}
             print(f"  {name}: {len(res.stems)} files in {time.perf_counter() - t0:.1f}s", flush=True)
+        # the worker's batch pipeline (song N written while N+1 is separated) on two copies of the clip:
+        # each must be identical to the single run of the same configuration ("batch-*" -> BATCH_OF)
+        import threading
+
+        from stemsplitter.worker import run_jobs
+
+        t0 = time.perf_counter()
+        songs = []
+        for i in range(2):
+            copy = out_root / f"batch{i}.wav"
+            copy.write_bytes(clip.read_bytes())
+            songs.append((i, copy))
+        _, quality, stems, fmt = next(c for c in CASES if c[0] == BATCH_OF)
+        opts = Options(output_dir=out_root / "batch", quality=quality, stems=stems, output_format=fmt,
+                       ignore_memory_limit=True)
+        events: list = []
+        run_jobs(engine, songs, opts, threading.Event(), lambda *e: events.append(e))
+        for _, row, files, _secs in (e for e in events if e[0] == "done"):
+            hashes[f"batch-{row}"] = {k: hashlib.sha256(Path(p).read_bytes()).hexdigest() for k, p in sorted(files.items())}
+        failed = [e for e in events if e[0] == "failed"]
+        if failed:
+            raise RuntimeError(f"batch failed: {failed}")
+        print(f"  batch of 2 ({BATCH_OF}): {time.perf_counter() - t0:.1f}s", flush=True)
     finally:
         engine.close()
     return hashes
@@ -86,6 +112,8 @@ def main() -> int:
         print(f"captured {sum(len(v) for v in got.values())} files -> {path}")
         return 0
     want = json.loads(path.read_text())
+    for case in [c for c in got if c.startswith("batch-")]:
+        want.setdefault(case, want[BATCH_OF])  # a batch must write exactly what a single run writes
     bad = [(case, k) for case in want for k in want[case] if got.get(case, {}).get(k) != want[case][k]]
     bad += [(case, k) for case in got for k in got[case] if k not in want.get(case, {})]
     for case, k in bad:

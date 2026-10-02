@@ -102,7 +102,7 @@ def run_cli(argv: list[str]) -> int:
                     report(pending)  # one song at a time while memory is short
                     pending = None
                 print(f"\n==> {f}")
-                separated = engine.split(f, opts, progress)
+                separated = engine.split(f, opts, progress, assemble=False)  # assembled on the writer
                 if pending is not None:
                     report(pending)
                 pending = writer.submit(engine.write_stems, separated, opts, lambda frac, text: None)

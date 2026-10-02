@@ -54,7 +54,7 @@ def run_jobs(engine, jobs: list[tuple[int, Path]], opts, cancel, emit: Emit) -> 
     from .engine import Cancelled
 
     def write(row: int, separated, progress) -> bool:
-        """Writer thread: save one song and report it as soon as its files are on disk."""
+        """Writer thread: assemble and save one song, and report it as soon as its files are on disk."""
         try:
             res = engine.write_stems(separated, opts, progress, cancel)
             emit("done", row, {k: str(v) for k, v in res.stems.items()}, res.seconds)
@@ -85,7 +85,7 @@ def run_jobs(engine, jobs: list[tuple[int, Path]], opts, cancel, emit: Emit) -> 
                     break
                 progress = lambda f, t, r=row: emit("status", r, f, t)  # noqa: E731
                 try:
-                    separated = engine.split(path, opts, progress, cancel)
+                    separated = engine.split(path, opts, progress, cancel, assemble=False)  # see write()
                 except Cancelled:
                     cancelled = True
                     emit("failed", row, "Cancelled")

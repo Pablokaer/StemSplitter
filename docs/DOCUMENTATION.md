@@ -234,10 +234,13 @@ In chronological order, with the measured gain:
 | 18 | **Memory governor:** budget = used + available − reserve, recomputed every 250 ms | never eats into the memory the system needs ([4.6](#46-memory-governor)) |
 | 19 | **Checkpoints** per song and **automatic restart** of a crashed worker | no work lost on a crash, a cancel or a lack of memory |
 | 20 | **Only the written instruments are accumulated** in the chunk loop, and the window counter is one row instead of 6 × 2 identical ones | CPU work around each chunk of a 4-minute song, 4 stems: 54.5 → 38.3 ms; Vocals only: 43.1 → 16.4 ms ([below](#43-optimizations-in-place)) |
+| 21 | **The stems are assembled on the writer thread** in a batch, not on the thread that feeds the GPU | 3 songs of 4 min, 4 stems: 93.5 → 88.8 s ([below](#43-optimizations-in-place)) |
 
 The details and measurements of items 11 to 15 are in [section 4.5](#45-scalability-and-memory-use) and those of 16 to 19 in [section 4.6](#46-memory-governor). All of them keep the output bit-identical.
 
 **Item 20.** The stem model returns all 6 instruments for every chunk, and the loop used to copy all of them from the GPU, apply the window, add them up, slide them and divide them, then keep only the ones written (3 for the default 4 stems: Other is rebuilt from the mix; 1 for Vocals only). Now the rows that are not written are dropped on the device right after the model, so only the kept ones are copied and processed; every kept sample goes through exactly the same operations, so the output is bit-identical (the golden output with the real models and the regression tests, [7.3](#73-measuring-quality-and-speed)). On a CUDA GPU these buffers live on the CPU (the library's rule keeps them on the device only on Apple GPUs), and this work leaves the GPU idle. Measured with `benchmarks/bench_engine.py loop` (i5-12500H, the network replaced by a fake that costs almost nothing, 4-minute song, 51 chunks, median of 5 runs), per chunk: 4 stems 54.5 → 38.3 ms, Vocals only 43.1 → 16.4 ms, all 8 outputs 63.9 → 48.5 ms; peak RSS 706 → 658 MB. Against the ~1 s the real stem model takes per chunk on an RTX 3050 Laptop, that is ~1.5–2.5 % of the stem pass; the end-to-end gain on a GPU was not measured (the GPU was held at 10 W by the laptop's power settings during this work). Checkpoints are smaller too (the buffers they save shrink the same way); a checkpoint written by an earlier version is not resumed: that model pass starts again (decoding and finished passes are kept).
+
+**Item 21.** `split()` used to build the final stems (`_assemble`: 1.4 s for a 4-minute song with 4 stems, 3.3 s with all 8, measured with `bench_engine.py tail`) before returning, so in a batch the next song could not start on the GPU until the previous one was assembled. The worker and the CLI now call `split(..., assemble=False)`, which returns as soon as the models are done, and `write_stems()`, which already runs on the writer thread, assembles the stems before encoding them. Same code, same order of operations: the output is bit-identical (the golden output includes two songs through the worker's batch pipeline, and the regression tests check the batch and the CLI). `split()` without the argument and `separate()` still assemble inside `split()`. Measured with `bench_engine.py batch` (i5-12500H, 3 songs of 4 minutes, a fake network that keeps an emulated GPU busy 0.5 s per chunk, MP3 320, median of 5 runs): 4 stems **93.5 → 88.8 s** (runs 91.5–98.9 s before, 88.0–94.7 s after); all 8 outputs 123.7 → 98.2 s, but the runs before spread from 103 to 138 s (8 encoders competing with other programs for the CPU), so that gain is not precise: the best runs went 103.0 → 95.0 s. Only songs followed by another song gain; a single song takes as long as before. While song N+1 is separated, the model outputs of song N stay on disk until its assembly finishes (about one song's worth of extra `work/` space for a moment).
 
 ### 4.4 Tried and dropped
 
@@ -372,7 +375,7 @@ The stages in `engine.py`:
 1. **`_decode`:** ffmpeg turns any format into 44.1 kHz stereo float32 and pipes it straight into a NumPy array, with no temporary file.
 2. **Gain:** if the peak is above 1.0, the model input is multiplied by `1/peak`.
 3. **`_stream_model`:** runs the `audio-separator` model chunk by chunk with the library's own demix loop, writing every finished sample to the song's work folder ([4.6](#46-memory-governor)).
-4. **`_assemble`:** block by block, builds only the chosen outputs (`Options.outputs()`) from the model stems they need (`model_stems()`; the stem model writes only those): undoes the gain; Vocals (the average of the two models in Maximum), Drums, Bass, Guitar, Piano; Other = mix − sum; Instrumental (mix − Vocals); No Drums (mix − Drums); and each stem's peak for the clipping protection.
+4. **`_assemble`** (inside `split()`, or at the start of `write_stems()` when the worker or the CLI call `split(..., assemble=False)`, so that in a batch it runs on the writer thread): block by block, builds only the chosen outputs (`Options.outputs()`) from the model stems they need (`model_stems()`; the stem model writes only those): undoes the gain; Vocals (the average of the two models in Maximum), Drums, Bass, Guitar, Piano; Other = mix − sum; Instrumental (mix − Vocals); No Drums (mix − Drums); and each stem's peak for the clipping protection.
 5. **`write_stems`:** encodes the stems in parallel (as many at once as the governor allows), streaming each one to ffmpeg's stdin block by block; each file is written under a `.part` name and renamed when complete.
 
 `_decode`, `_stream_model`, `_assemble` and `write_stems` all read and write the work folder through `_Track` (10 s blocks), so a song never has to fit in memory.
@@ -394,6 +397,9 @@ result = engine.separate("song.mp3", opts, progress=lambda frac, text: ...)
 # or, to overlap writing and separation:
 sep = engine.split("song.mp3", opts, progress)         # -> Separated (stems as files in the work folder)
 result = engine.write_stems(sep, opts, progress)       # -> Result (paths + seconds)
+# assemble=False leaves building the stems to write_stems (the worker and the CLI do this, so in a batch
+# the assembly runs on the writer thread); sep.stems is then empty until write_stems fills it
+sep = engine.split("song.mp3", opts, progress, assemble=False)
 
 engine.prepare_models(progress, quality="maximum")     # download/load ahead of time (optional)
 engine.close()
@@ -411,7 +417,7 @@ engine.close()
 |---|---|
 | GUI process, main thread (Qt) | Window and events; the `EngineProcess` reads the worker's event queue every 50 ms and forwards the events as signals |
 | Worker process, main thread (`worker.serve`) | `engine.split()` for each song (decoding and inference on the GPU/CPU) |
-| Worker process, *writer* (1 thread) | `engine.write_stems()` for the previous song and its done event |
+| Worker process, *writer* (1 thread) | `engine.write_stems()` for the previous song (assembling its stems, then encoding them) and its done event |
 | Worker process, encoder *pool* (up to N threads) | One ffmpeg/LAME process per stem, as many at once as the governor allows |
 | Worker process, *memory governor* (1 thread) | Samples the memory every 250 ms and sends a `memory` event about once a second while busy |
 
@@ -573,3 +579,4 @@ python benchmarks/bench_engine.py loop|tail|batch    # timings, median of severa
 | — | Stem picker: *Stems to extract* checkboxes in Output Settings (Vocals, Drums, Bass, Other (melody), Guitar, Piano (keys), Instrumental, and the new **No Drums** = `mix − drums`, the song with only the drums removed), settings key `stems` (old `instrumental` / `guitar_piano` keys migrated), `--stems` CLI option and `Options.stems`. Only the chosen files are written and the stem model writes only the stems they need; *Maximum* skips the vocal model when no chosen output needs vocals. Guitar and Piano can now be picked separately. Output bit-identical for the combinations offered before |
 | — | Regression tests (`tests/test_engine.py`, golden output of the pipeline with a fake network) and benchmarks (`benchmarks/`: chunk loop, per-song tail, batch, and a golden-output check with the real models). No change to the app |
 | — | Chunk loop: only the instruments that are written are accumulated (and copied off the GPU), and the window counter is one row: CPU work per chunk 54.5 → 38.3 ms with 4 stems, 43.1 → 16.4 ms with Vocals only; output bit-identical. Checkpoints from earlier versions restart their model pass |
+| — | In a batch the stems are assembled on the writer thread (`split(..., assemble=False)` in the worker and the CLI), so the next song reaches the GPU sooner: 3 songs of 4 min with 4 stems 93.5 → 88.8 s (emulated GPU); output bit-identical |

@@ -170,6 +170,17 @@ class Result:
 
 
 @dataclass
+class _PendingAssembly:
+    """What write_stems needs to build the stems itself (see split(assemble=False))."""
+
+    frames: int
+    names: list[str]
+    outputs: list[str]
+    gain: float
+    maximum: bool
+
+
+@dataclass
 class Separated:
     """The stems of one song (samples x channels float32, as arrays or files), ready to write."""
 
@@ -180,6 +191,7 @@ class Separated:
     started: float
     work: Optional["_Work"] = None  # the song's work folder, removed once every file is written
     peaks: dict[str, float] = field(default_factory=dict)  # per stem, for the clipping protection
+    pending: Optional[_PendingAssembly] = None  # set when write_stems still has to assemble the stems
 
 
 # --------------------------------------------------------------------------------------
@@ -837,11 +849,14 @@ class StemEngine:
         return frames, peak
 
     def split(
-        self, input_path: Path, opts: Options, progress: ProgressFn, cancel: Optional[threading.Event] = None
+        self, input_path: Path, opts: Options, progress: ProgressFn, cancel: Optional[threading.Event] = None,
+        assemble: bool = True,
     ) -> Separated:
         """Decode and separate one song into stem files in its work folder (see write_stems).
 
         A song that was cancelled or interrupted (crash, power cut) continues where it stopped.
+        assemble=False returns as soon as the models are done and leaves building the final stems to
+        write_stems: in a batch that runs on the writer thread, so the next song reaches the GPU sooner.
         """
         t0 = time.time()
         input_path = Path(input_path)
@@ -905,10 +920,12 @@ class StemEngine:
                                        {"vocals": "mel_Vocals"}, "vocals", "Refining vocals", stage("vocals"))
                     lap("vocals")
 
-                # 4) assemble -----------------------------------------------------------------------
+                # 4) assemble (here, or in write_stems) ---------------------------------------------
+                pending = _PendingAssembly(frames, names, outputs, gain, refine_vocals)
+                if not assemble:
+                    return Separated(input_path, {}, SAMPLE_RATE, timings, t0, work=work, pending=pending)
                 stage("mix")(0, "Assembling stems...")
-                self._assemble(work, frames, names, outputs, gain, refine_vocals)
-                work.drop(*(f"sw_{k}" for k in names), "mel_Vocals")
+                self._finish_assembly(work, pending)
             stems = {k: work.array(f"out_{k}", frames, "r") for k in outputs}
             memlog("stems assembled", self.log)
             return Separated(input_path, stems, SAMPLE_RATE, timings, t0, work=work,
@@ -925,8 +942,14 @@ class StemEngine:
             raise RuntimeError(f"Not enough free disk space: {need / GB:.1f} GB needed in {work.dir.parent}, "
                                f"{free / GB:.1f} GB free")
 
+    def _finish_assembly(self, work: _Work, a: _PendingAssembly,
+                         check: Optional[Callable[[], None]] = None) -> None:
+        """Build the final stems and drop the model outputs they came from."""
+        self._assemble(work, a.frames, a.names, a.outputs, a.gain, a.maximum, check)
+        work.drop(*(f"sw_{k}" for k in a.names), "mel_Vocals")
+
     def _assemble(self, work: _Work, frames: int, names: list[str], finals: list[str], gain: float,
-                  maximum: bool) -> None:
+                  maximum: bool, check: Optional[Callable[[], None]] = None) -> None:
         """Build the `finals` block by block (same operations, in the same order, as in memory).
 
         `names` are the model stems (see model_stems()). Vocals = average of the two models in
@@ -939,9 +962,10 @@ class StemEngine:
         mel = work.array("mel_Vocals", frames, "r") if maximum else None
         out = {k: work.array(f"out_{k}", frames, "w+") for k in finals}
         peaks = dict.fromkeys(finals, 0.0)
+        check = check or HUB.check_cancel
         for i in range(0, frames, BLOCK_FRAMES):
             j = min(frames, i + BLOCK_FRAMES)
-            HUB.check_cancel()
+            check()
             block = {k: np.array(src[k][i:j]) for k in names}
             if maximum:
                 block["Vocals"] += mel[i:j]  # same as 0.5 * (vocals + kim)
@@ -979,6 +1003,13 @@ class StemEngine:
         the next song is being separated.
         """
         t = time.time()
+        if sep.pending is not None:  # split(assemble=False): build the stems here, off the GPU thread
+            progress(0.93, "Assembling stems...")
+            self._finish_assembly(sep.work, sep.pending, lambda: _raise_if(cancel))
+            sep.stems = {k: sep.work.array(f"out_{k}", sep.pending.frames, "r") for k in sep.pending.outputs}
+            sep.peaks = dict(sep.work.state.get("peaks", {}))
+            sep.pending = None
+            memlog("stems assembled", self.log)
         song = sep.input_path.stem
         dest = Path(opts.output_dir) / _safe_name(song)
         dest.mkdir(parents=True, exist_ok=True)
