@@ -666,17 +666,23 @@ class StemEngine:
         step = chunk // mi.overlap
         instruments = [str(i).lower() for i in cfg.training.instruments]
         target = cfg.training.target_instrument
-        rows = {name: (0 if target else instruments.index(name)) for name in outputs}
+        # Only the instruments that are written are accumulated (the model also returns e.g. its own "other",
+        # or 5 stems nobody asked for): each kept sample goes through exactly the same operations as before.
+        # A single-target model returns no instrument dimension; its output broadcasts into the one row.
+        model_rows = sorted({0 if target else instruments.index(name) for name in outputs})
+        rows = {name: model_rows.index(0 if target else instruments.index(name)) for name in outputs}
         device = next(mi.model_run.parameters()).device
+        pick = None if target or len(model_rows) == len(instruments) else torch.tensor(model_rows, device=device)
         estimated = mdxc._estimate_roformer_full_track_buffer_bytes(len(instruments), 2, frames, chunk)
         acc = device if mdxc.should_accumulate_on_device(device, estimated) else torch.device("cpu")
         window = torch.tensor(signal.windows.hamming(chunk), dtype=torch.float32, device=acc)
         starts = mi._roformer_chunk_starts(frames, chunk, step)
-        shape = (len(instruments), 2, chunk)
+        shape = (len(model_rows), 2, chunk)
+        counter_shape = (1, 1, chunk)  # the window sum is the same for every instrument and channel
 
         mix = work.array("mix", frames, "r")
         saved = dict(work.state.get(tag) or {})
-        resumable = all(work.path(f).is_file() for f in outputs.values())
+        resumable = all(work.path(f).is_file() for f in outputs.values()) and saved.get("rows") == model_rows
         if resumable and saved.get("next") and (work.dir / saved.get("window", "-")).is_file():
             k0, base = saved["next"], saved["base"]
             with np.load(work.dir / saved["window"]) as buffers:  # closed at once (Windows can't delete open files)
@@ -687,7 +693,7 @@ class StemEngine:
         else:
             k0, base = 0, 0
             result = torch.zeros(shape, dtype=torch.float32, device=acc)
-            counter = torch.zeros(shape, dtype=torch.float32, device=acc)
+            counter = torch.zeros(counter_shape, dtype=torch.float32, device=acc)
             outs = {name: work.array(f, frames, "w+") for name, f in outputs.items()}
 
         def flush(n: int) -> None:
@@ -705,7 +711,7 @@ class StemEngine:
             name = f"{tag}-{k_next}.npz"
             np.savez(work.dir / name, result=result.cpu().numpy(), counter=counter.cpu().numpy())
             old = saved.get("window")
-            work.save(**{tag: {"next": k_next, "base": base, "window": name}})
+            work.save(**{tag: {"next": k_next, "base": base, "window": name, "rows": model_rows}})
             saved["window"] = name
             if old and old != name:
                 work.unlink(old)
@@ -737,6 +743,8 @@ class StemEngine:
                 length = part.shape[-1]
                 try:
                     x = mi._run_roformer_model(part)
+                    if pick is not None:
+                        x = x.index_select(0, pick)  # before the copy to `acc`: only the kept rows move
                     if x.device != acc:
                         x = x.to(acc)
                 except Exception as exc:
