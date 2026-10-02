@@ -343,6 +343,8 @@ With memory to spare, *Maximum* still peaks about as high as before: with a rela
 | `ruff.toml` | Lint rules (real errors only) |
 | `CLAUDE.md` | Project rules for Claude Code: everything in English, and every relevant change documented |
 | `tools/make_icon.py` | Generates the icons in `assets/` |
+| `tests/test_engine.py`, `tests/golden_fake.json` | Engine regression tests with a fake network: every written file compared byte for byte with a golden output ([7.3](#73-measuring-quality-and-speed)) |
+| `benchmarks/` | `fake_model.py` (the fake network), `bench_engine.py` (chunk loop, per-song tail, batch) and `golden.py` (golden output with the real models) |
 
 ### 5.2 Flow of one song
 
@@ -506,7 +508,20 @@ The method of section 3.2 is easy to repeat:
 2. Decode the streams of each `.stem.mp4`: 0 = mix, 1 = drums, 2 = bass, 3 = other, 4 = vocals.
 3. Concatenate the 50 test excerpts, run `engine.split()` on the result and compute the SDR per excerpt against the ground truth.
 
-For speed, the log already has the time of every stage. For fine measurements, synchronize the GPU (`torch.cuda.synchronize()`) before every time reading and **close other programs that use the GPU**.
+For speed, the log already has the time of every stage. For fine measurements, synchronize the GPU (`torch.cuda.synchronize()`) before every time reading and **close other programs that use the GPU**. Check that the GPU is not held back by the system first: `nvidia-smi -q -d POWER,CLOCK` must not show a reduced *Current Power Limit* or an active *SW Power Cap*. On a laptop in a power-saving mode the limit can drop to 10 W (from 80 W), which made every split ~20× slower and every GPU timing meaningless.
+
+**Regression tests and benchmarks.** Changes to the engine must keep the output identical, and these check it:
+
+```bash
+python -m unittest discover -s tests -v              # ~1 min, no GPU and no model download
+python benchmarks/golden.py capture golden.json      # with the code before a change (real models)
+python benchmarks/golden.py compare golden.json      # after it: every file must hash the same
+python benchmarks/bench_engine.py loop|tail|batch    # timings, median of several runs, peak RSS
+```
+
+- `tests/test_engine.py` runs the real pipeline (ffmpeg decoding, the streaming chunk loop with its checkpoints, the assembly, the worker's batch pipeline, WAV writing) around a fake network (`benchmarks/fake_model.py`: each instrument is the input times a fixed factor, so the results are exact). Every file is compared byte for byte with `tests/golden_fake.json`, captured from the code before any optimization. It also checks that a split cancelled in the middle and resumed, and a batch, write the same files as a single uninterrupted run. `STEMSPLITTER_CAPTURE_GOLDEN=1` rewrites the golden file; only do that on purpose.
+- `benchmarks/golden.py` splits a synthetic 12 s clip (peak 1.3, so the gain path runs) with the real models in four configurations (Balanced and Maximum with all 8 stems, Fast with 4 stems as MP3, Maximum with only No Drums) and hashes every file. `STEMSPLITTER_GOLDEN_DEVICE=cpu` runs it on the CPU, which is deterministic and does not depend on the GPU's clocks; it takes ~7 min on an i5-12500H. (`CUDA_VISIBLE_DEVICES` cannot hide the GPU there: an empty value is dropped on Windows and `-1` made `torch.cuda.is_available()` crash with driver 580.97 and torch 2.14.1, so the script hides it inside the process.)
+- `benchmarks/bench_engine.py`: `loop` times the stem pass of a 4-minute song with a network that costs nothing, i.e. the per-chunk work outside the network, which on a GPU leaves the GPU idle; `tail` times the assembly and the writing of one song; `batch` runs `worker.run_jobs` over several songs with a network that sleeps per chunk like a busy GPU, to show how much CPU work overlaps it.
 
 ### 7.4 Extension points
 
@@ -553,3 +568,4 @@ For speed, the log already has the time of every stage. For fine measurements, s
 | `fd7d56d` | *Ignore the memory limit* setting (Settings page, saved between sessions) and `--no-memory-limit` CLI option: the memory governor stops holding back (never waits, always the relaxed level, no Apple GPU cap) and the status bar shows "no limit"; off by default. The `prepare` worker command gained an `unlimited` field and the memory snapshot an `unlimited` key |
 | `ec0c92a` | *Ignore the memory limit* is now ticked by default in the window (settings key `ignore_memory_limit`, default `true`); the CLI and the engine API still default to the limit |
 | — | Stem picker: *Stems to extract* checkboxes in Output Settings (Vocals, Drums, Bass, Other (melody), Guitar, Piano (keys), Instrumental, and the new **No Drums** = `mix − drums`, the song with only the drums removed), settings key `stems` (old `instrumental` / `guitar_piano` keys migrated), `--stems` CLI option and `Options.stems`. Only the chosen files are written and the stem model writes only the stems they need; *Maximum* skips the vocal model when no chosen output needs vocals. Guitar and Piano can now be picked separately. Output bit-identical for the combinations offered before |
+| — | Regression tests (`tests/test_engine.py`, golden output of the pipeline with a fake network) and benchmarks (`benchmarks/`: chunk loop, per-song tail, batch, and a golden-output check with the real models). No change to the app |
