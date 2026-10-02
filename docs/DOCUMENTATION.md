@@ -28,13 +28,16 @@ StemSplitter is a desktop app for **Windows and macOS** that splits a song into 
 | **Drums** | Drum kit and percussion |
 | **Bass** | Bass guitar, synth bass, 808 |
 | **Other** | Everything else: melody and harmony (guitars, keys, synths, strings…) |
-| **Guitar** and **Piano** (optional) | Split out of Other, for 6 stems |
-| **Instrumental** (optional) | Everything except the vocals |
+| **Guitar** and **Piano** | Split out of Other, for 6 stems |
+| **Instrumental** | Everything except the vocals |
+| **No Drums** | Everything except the drums: the song with only the drums taken out |
+
+Every stem is optional: the user ticks the ones to write, from one stem up to all eight (default: Vocals, Drums, Bass and Other). See [2.3](#23-output-options).
 
 In short:
 
 - **Input:** MP3, WAV, FLAC, M4A, AAC, OGG, Opus, AIFF or WMA. Single files or whole folders.
-- **Output:** one file per stem, as MP3 (320, 256 or 192 kbps) or 24-bit WAV, in one subfolder per song (`Song/Song - Vocals.mp3`, …).
+- **Output:** one file per chosen stem, as MP3 (320, 256 or 192 kbps) or 24-bit WAV, in one subfolder per song (`Song/Song - Vocals.mp3`, …).
 - **Engine:** BS-RoFormer SW (all stems in one pass) and, in the *Maximum* preset, also MelBand-RoFormer for the vocals. The models run on PyTorch, on the NVIDIA (CUDA) or Apple (Metal) GPU, with an automatic fallback to the CPU.
 - **Interfaces:** a desktop window (PySide6/Qt), a command line (`--cli`) and a self-test (`--selftest`) used by CI.
 - **Memory:** the app never takes the memory the system needs to stay responsive. It speeds up when memory is free and slows down or waits when it is short, without losing work ([section 4.6](#46-memory-governor)).
@@ -54,8 +57,8 @@ A dark window with a purple accent, built like an audio production tool: a sideb
 - **Retry only what failed:** pressing *Split Stems* again only picks up queued, cancelled or failed songs.
 - **Preloaded model:** when songs are added, PyTorch and the preset's model start loading in the background, so *Split Stems* starts almost at once.
 - **Robust batches:** a broken file fails on its own and the rest of the batch keeps going.
-- **Output Settings card:** *Save stems to* with *Browse…*, *Quality* with a one-line description of the selected preset, *Output format*, and the Instrumental and Guitar/Piano options. Two columns when the window is wide enough, one column otherwise.
-- **Processing card:** idle, it sums up what *Split Stems* will do ("3 songs to split · Balanced (recommended) · MP3 · 320 kbps") next to the *Split Stems* button. While a queue runs, it shows the song being separated, the stage (decoding, model download with MB, separation, writing, waiting for memory), an animated progress bar, the percentage and the time left, and *Cancel* takes the place of *Split Stems*. When song N is being written while song N+1 is separated, the card follows song N+1 and each row keeps its own progress. At the end it shows the result ("All done — 3 song(s) split", "Finished with 1 error(s) — see the log" or "Cancelled").
+- **Output Settings card:** *Save stems to* with *Browse…*, *Quality* with a one-line description of the selected preset, *Output format*, and *Stems to extract*: eight checkboxes in two columns (Vocals, Drums, Bass, Other (melody), Guitar, Piano (keys), Instrumental (no vocals), No Drums (song without drums)), each with a tooltip. *Split Stems* asks for at least one ticked stem. The card has two columns when the window is wide enough and one column otherwise.
+- **Processing card:** idle, it sums up what *Split Stems* will do ("3 songs to split · 4 files per song · Balanced (recommended) · MP3 · 320 kbps") next to the *Split Stems* button. While a queue runs, it shows the song being separated, the stage (decoding, model download with MB, separation, writing, waiting for memory), an animated progress bar, the percentage and the time left, and *Cancel* takes the place of *Split Stems*. When song N is being written while song N+1 is separated, the card follows song N+1 and each row keeps its own progress. At the end it shows the result ("All done — 3 song(s) split", "Finished with 1 error(s) — see the log" or "Cancelled").
 - **Time left:** estimated in the window from the song's own progress rate since its separation started; the time spent starting the engine, loading or downloading a model or waiting for memory is left out. Nothing is shown during the first 5 s or the first 2% of a song.
 - **Status bar:** the device in use (for example "Processing on: NVIDIA GPU · NVIDIA GeForce RTX 3050 Laptop GPU", "Apple Silicon GPU (Metal)" or "CPU · 12 threads"; before the engine starts, "Device: detected when songs are added"), the memory in use while a queue runs, and the queue summary ("3 files | 2 completed | 1 processing | 1 failed").
 - **Log** that can be shown or hidden (*Show log* in the processing card), with the time of every stage per song. It opens by itself when there is an error.
@@ -65,7 +68,7 @@ A dark window with a purple accent, built like an audio production tool: a sideb
 - **Batch page:** how the queue handles many songs, with *Add Folder* and *Go to Split* buttons. **Settings page:** *Keep free for the system*, how much memory StemSplitter must always leave to the rest of the computer (Automatic, or 1–8 GB), and *Ignore the memory limit*, which switches the limit off (the reserve is then greyed out). The window ships with *Ignore the memory limit* **ticked**: untick it to apply the reserve. See [section 4.6](#46-memory-governor). **About page:** version, models and licenses.
 - **Memory in use** in the status bar while a queue runs, for example "Memory: 1.4 GB · limit 2.3 GB". When memory is short, the song's stage says "Waiting for free memory (N MB more needed)…" and the work continues as soon as memory frees up.
 - **Nothing is lost on a crash:** if the separation process dies (for example, the system ends it when memory runs out), the window starts it again and every song continues from its last checkpoint. A cancelled song also continues where it stopped when it is split again.
-- **Settings remembered between sessions:** output folder, quality (saved by preset name), format, Instrumental, Guitar/Piano, the memory reserve and the last input folder. The keys are the same as before the redesign, so existing settings carry over.
+- **Settings remembered between sessions:** output folder, quality (saved by preset name), format, the ticked stems (key `stems`, a comma-separated list of stem names), the memory reserve and the last input folder. Settings saved before the stem picker carry over: without a `stems` key the 4 stems are ticked, plus Instrumental and Guitar/Piano if the old `instrumental` and `guitar_piano` keys were on. If no stem is ticked when the window closes, the last saved choice is kept.
 - **Look:** Qt's Fusion style with a style sheet built from the tokens in `stemsplitter/ui/theme.py` (colors, type sizes, spacing, radii), the same dark theme on every OS, and a dark title bar on Windows 11 and macOS (Qt 6.8+ color scheme). Font: Inter when installed, otherwise Segoe UI Variable / Segoe UI on Windows and the system font on macOS; no font is bundled. Icons are one outline family drawn from inline SVG (`stemsplitter/ui/icons.py`), with no icon files.
 
 ### 2.2 Quality presets
@@ -81,16 +84,22 @@ The old name `high` is still accepted, as an alias of `balanced`.
 ### 2.3 Output options
 
 - **Format:** MP3 320/256/192 kbps (LAME) or 24-bit PCM WAV. Every MP3 gets the title `Song (Stem)` in its metadata.
-- **Instrumental:** also writes `mix − vocals`.
-- **Guitar and Piano:** takes guitar and piano out of Other at no extra time, because the model already produces those stems in the same pass.
+- **Stems to extract:** any set of the eight outputs; only the chosen ones are written. The stem model always runs once over the whole song (it produces every stem in the same pass), so leaving stems out mostly saves encoding time and disk space, not separation time. One exception: in *Maximum*, when no chosen output needs the vocals (Vocals, Other or Instrumental), the second vocal model's pass is skipped (the window may still preload that model when songs are added). This was not timed separately.
+- **Other (melody):** `mix − (vocals + drums + bass)`, also minus Guitar and Piano when those are ticked. So with Guitar ticked and Piano not, the piano stays inside Other. The written stems then add up to the original song exactly.
+- **Guitar and Piano:** each one, on its own, is taken out of Other at no extra time, because the model already produces those stems in the same pass.
+- **Instrumental:** `mix − vocals`.
+- **No Drums:** `mix − drums`, the song with only the drums removed (vocals, bass and everything else kept). It uses the Drums stem the model already produces. No Drums + Drums add up to the original song exactly (up to float32 rounding). Its quality has not been measured on its own; it follows the Drums stem's (see [section 3](#3-separation-quality)). To get only the song without drums, tick No Drums alone.
+- **Output unchanged:** for every combination the app offered before (4 stems, with or without Instrumental and Guitar/Piano, in every preset), the stems are bit-identical to the previous version (checked on synthetic tracks by comparing the old and new `_assemble`).
 - **Clipping protection:** if a stem's peak goes above 0.999, only that file is turned down just enough not to distort.
 
 ### 2.4 Command line
 
 ```bash
 python main.py --cli song1.mp3 song2.flac -o output_folder \
-    -q balanced|maximum|fast  -b 320  --wav  --instrumental  --guitar-piano  --reserve-mb 2048  --no-memory-limit
+    -q balanced|maximum|fast  -b 320  --wav  --stems vocals,drums,bass,other  --instrumental  --guitar-piano  --reserve-mb 2048  --no-memory-limit
 ```
+
+`--stems` takes a comma-separated list of `vocals`, `drums`, `bass`, `other` (or `melody`), `guitar`, `piano` (or `keys`), `instrumental`, `no-drums`, or `all`; the default is `vocals,drums,bass,other`. For the song without drums only: `--stems no-drums`. `--instrumental` and `--guitar-piano` still work and add those stems to the list.
 
 `--reserve-mb` is the memory the system must keep free (default: automatic); `--no-memory-limit` ignores the limit (see [section 4.6](#46-memory-governor)). It prints the device, the progress and where each stem was written. With several songs, one song is written while the next one is separated (see [section 4.3](#43-optimizations-in-place)).
 
@@ -99,7 +108,7 @@ python main.py --cli song1.mp3 song2.flac -o output_folder \
 - **The models download themselves on first use,** with visible progress: ~0.7 GB for SW, plus ~0.9 GB for MelBand, only if *Maximum* is used.
 - **Where they live:** `%LOCALAPPDATA%\StemSplitter\models` on Windows and `~/Library/Application Support/StemSplitter/models` on macOS.
 - **In the same data folder:** `stemsplitter.log` (output of the builds without a console), `selftest.txt` (self-test result), `numba_cache` (librosa's cache), `bin/` (a copy of ffmpeg when the app runs from source) and `work/`, one folder per song being split (its audio and checkpoint; removed as soon as the song's files are written, and after 7 days if the song is never split again).
-- **Disk space while splitting:** about 21 MB per minute of song per track in `work/`, up to ~14 tracks for 6 stems + Instrumental in *Maximum*, so roughly 0.3 GB per minute of song at most (~1.2 GB for a 4-minute song). The app checks the free space after decoding.
+- **Disk space while splitting:** about 21 MB per minute of song per track in `work/`, up to ~15 tracks with all eight stems in *Maximum*, so roughly 0.3 GB per minute of song at most (~1.2 GB for a 4-minute song). The app checks the free space after decoding.
 
 ### 2.6 Hardware selection
 
@@ -358,7 +367,7 @@ The stages in `engine.py`:
 1. **`_decode`:** ffmpeg turns any format into 44.1 kHz stereo float32 and pipes it straight into a NumPy array, with no temporary file.
 2. **Gain:** if the peak is above 1.0, the model input is multiplied by `1/peak`.
 3. **`_stream_model`:** runs the `audio-separator` model chunk by chunk with the library's own demix loop, writing every finished sample to the song's work folder ([4.6](#46-memory-governor)).
-4. **`_assemble`:** block by block, undoes the gain; Vocals (the average of the two models in Maximum), Drums, Bass and, if requested, Guitar and Piano; Other = mix − sum; optional Instrumental; and each stem's peak for the clipping protection.
+4. **`_assemble`:** block by block, builds only the chosen outputs (`Options.outputs()`) from the model stems they need (`model_stems()`; the stem model writes only those): undoes the gain; Vocals (the average of the two models in Maximum), Drums, Bass, Guitar, Piano; Other = mix − sum; Instrumental (mix − Vocals); No Drums (mix − Drums); and each stem's peak for the clipping protection.
 5. **`write_stems`:** encodes the stems in parallel (as many at once as the governor allows), streaming each one to ffmpeg's stdin block by block; each file is written under a `.part` name and renamed when complete.
 
 `_decode`, `_stream_model`, `_assemble` and `write_stems` all read and write the work folder through `_Track` (10 s blocks), so a song never has to fit in memory.
@@ -370,7 +379,9 @@ from stemsplitter.engine import StemEngine, Options
 
 engine = StemEngine(log=print)            # keeps the loaded models between songs; starts its own memory governor
 opts = Options(output_dir="output", quality="balanced", bitrate_kbps=320,
-               output_format="mp3", also_instrumental=False, guitar_piano=False,
+               output_format="mp3",
+               stems=("Vocals", "Drums", "Bass", "Other"),  # any of engine.OUTPUTS, e.g. ("No Drums",)
+               also_instrumental=False, guitar_piano=False,  # older switches, added to `stems`
                memory_reserve_mb=0,       # 0 = automatic reserve
                ignore_memory_limit=False) # True = the governor never waits or holds back
 
@@ -540,4 +551,5 @@ For speed, the log already has the time of every stage. For fine measurements, s
 | `fb28734` | Memory governor: streaming inference and file-backed work tracks (bit-identical output, memory no longer grows with the song), budget = used + available − reserve with a user setting, waiting instead of failing, checkpoints per song and automatic restart of a crashed worker |
 | `7c4e3b1` | Redesigned window: dark theme with a purple accent, sidebar (Split, Batch, Settings, About), drop area with *Add Files* / *Add Folder*, queue rows with state icons and per-song time left, *Output Settings* card (two columns when wide), processing card with an animated bar and *Cancel*, status bar with the device and queue summary; the memory reserve moved to the Settings page and About from the Help menu to a page. Theme tokens, icons and components in `stemsplitter/ui/`. Processing, worker protocol, queue, cancellation and settings keys unchanged; idle window ~70 MB → ~83 MB |
 | `fd7d56d` | *Ignore the memory limit* setting (Settings page, saved between sessions) and `--no-memory-limit` CLI option: the memory governor stops holding back (never waits, always the relaxed level, no Apple GPU cap) and the status bar shows "no limit"; off by default. The `prepare` worker command gained an `unlimited` field and the memory snapshot an `unlimited` key |
-| — | *Ignore the memory limit* is now ticked by default in the window (settings key `ignore_memory_limit`, default `true`); the CLI and the engine API still default to the limit |
+| `ec0c92a` | *Ignore the memory limit* is now ticked by default in the window (settings key `ignore_memory_limit`, default `true`); the CLI and the engine API still default to the limit |
+| — | Stem picker: *Stems to extract* checkboxes in Output Settings (Vocals, Drums, Bass, Other (melody), Guitar, Piano (keys), Instrumental, and the new **No Drums** = `mix − drums`, the song with only the drums removed), settings key `stems` (old `instrumental` / `guitar_piano` keys migrated), `--stems` CLI option and `Options.stems`. Only the chosen files are written and the stem model writes only the stems they need; *Maximum* skips the vocal model when no chosen output needs vocals. Guitar and Piano can now be picked separately. Output bit-identical for the combinations offered before |

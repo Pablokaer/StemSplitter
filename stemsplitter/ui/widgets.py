@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -547,11 +548,11 @@ class FileQueue(QFrame):
 
 # -- output settings --------------------------------------------------------------------
 class OutputSettings(QFrame):
-    """Output folder, quality, format and the two extra outputs; two columns when there is room."""
+    """Output folder, quality, format and the stems to extract; two columns when there is room."""
 
     GAP = Spacing.XL
 
-    def __init__(self, qualities, formats):
+    def __init__(self, qualities, formats, stems):
         super().__init__()
         self.setObjectName("card")
         lay = QVBoxLayout(self)
@@ -607,14 +608,22 @@ class OutputSettings(QFrame):
         rl.addSpacing(Spacing.SM)
         rl.addWidget(label("One file per stem, in a subfolder for each song.", "hint", wrap=True))
         rl.addSpacing(Spacing.LG + 4)
-        self.chk_inst = QCheckBox("Also save an instrumental track (everything except vocals)")
-        self.chk_gp = QCheckBox("Also split Guitar and Piano out of Other (6 stems)")
-        for chk in (self.chk_inst, self.chk_gp):
+        rl.addWidget(label("Stems to extract", "fieldLabel"))
+        rl.addSpacing(Spacing.SM)
+        self.stem_grid = QWidget()
+        grid = QGridLayout(self.stem_grid)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(Spacing.LG)
+        grid.setVerticalSpacing(Spacing.SM)
+        self.stem_checks: dict[str, QCheckBox] = {}
+        for i, (name, text, tip) in enumerate(stems):
+            chk = QCheckBox(text)
+            chk.setToolTip(tip)
             chk.setCursor(Qt.PointingHandCursor)
             chk.setMinimumHeight(28)
-        rl.addWidget(self.chk_inst)
-        rl.addSpacing(Spacing.MD)
-        rl.addWidget(self.chk_gp)
+            grid.addWidget(chk, i // 2, i % 2)
+            self.stem_checks[name] = chk
+        rl.addWidget(self.stem_grid)
         rl.addStretch(1)
 
         self.divider = QFrame()
@@ -630,7 +639,7 @@ class OutputSettings(QFrame):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         inner = self.contentsRect().width() - 2 * Spacing.XL
-        need = max(self.chk_inst.sizeHint().width(), self.chk_gp.sizeHint().width(), 340)
+        need = max(self.stem_grid.sizeHint().width(), 340)
         two = (inner - 2 * self.GAP - 1) / 2 >= need
         direction = QBoxLayout.LeftToRight if two else QBoxLayout.TopToBottom
         if self.columns.direction() != direction:

@@ -13,8 +13,28 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
+# --stems names (lower case, any spacing) -> engine output names
+STEM_ALIASES = {"vocals": "Vocals", "drums": "Drums", "bass": "Bass", "other": "Other", "melody": "Other",
+                "guitar": "Guitar", "piano": "Piano", "keys": "Piano", "instrumental": "Instrumental",
+                "no-drums": "No Drums", "nodrums": "No Drums"}
+
+
+def parse_stems(text: str) -> tuple[str, ...]:
+    if text.strip().lower() == "all":
+        return tuple(dict.fromkeys(STEM_ALIASES.values()))
+    names = []
+    for part in text.split(","):
+        key = part.strip().lower().replace(" ", "-").replace("_", "-")
+        if key not in STEM_ALIASES:
+            raise argparse.ArgumentTypeError(f"unknown stem {part.strip()!r} (choose from {', '.join(STEM_ALIASES)})")
+        names.append(STEM_ALIASES[key])
+    if not names:
+        raise argparse.ArgumentTypeError("choose at least one stem")
+    return tuple(names)
+
+
 def run_cli(argv: list[str]) -> int:
-    from stemsplitter.engine import Options, StemEngine
+    from stemsplitter.engine import DEFAULT_STEMS, Options, StemEngine
     from stemsplitter.platform_utils import default_output_dir
 
     parser = argparse.ArgumentParser(prog="StemSplitter --cli")
@@ -24,6 +44,10 @@ def run_cli(argv: list[str]) -> int:
                         help='"high" is the old name of "balanced"')
     parser.add_argument("-b", "--bitrate", type=int, default=320)
     parser.add_argument("--wav", action="store_true", help="write 24-bit WAV instead of MP3")
+    parser.add_argument("--stems", type=parse_stems, default=DEFAULT_STEMS,
+                        help="comma-separated files to write: vocals, drums, bass, other (melody), guitar, "
+                             "piano (keys), instrumental (no vocals), no-drums (the song without drums), or all "
+                             "(default: vocals,drums,bass,other)")
     parser.add_argument("--instrumental", action="store_true", help="also write an Instrumental (no vocals) file")
     parser.add_argument("--guitar-piano", action="store_true", help="also split Guitar and Piano out of Other")
     parser.add_argument("--reserve-mb", type=int, default=0,
@@ -58,6 +82,7 @@ def run_cli(argv: list[str]) -> int:
         output_dir=args.output,
         bitrate_kbps=args.bitrate,
         quality=args.quality,
+        stems=args.stems,
         also_instrumental=args.instrumental,
         guitar_piano=args.guitar_piano,
         output_format="wav" if args.wav else "mp3",
