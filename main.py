@@ -2,6 +2,7 @@
 
 python main.py                 -> opens the desktop app
 python main.py --cli song.mp3  -> headless mode (handy for batch jobs / testing)
+python main.py --selftest      -> checks a packaged build (CI, and the updater before it keeps a new version)
 """
 
 from __future__ import annotations
@@ -172,6 +173,10 @@ def main() -> int:
         return run_cli(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
         return run_selftest()
+    if len(sys.argv) > 2 and sys.argv[1] == "--apply-update":  # the update helper (see stemsplitter/updater.py)
+        from stemsplitter.ui.update_dialog import run_update_helper
+
+        return run_update_helper(Path(sys.argv[2]))
 
     from stemsplitter.gui import run_gui
 

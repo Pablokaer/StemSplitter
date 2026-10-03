@@ -2,6 +2,9 @@
 #   pyinstaller --noconfirm StemSplitter.spec
 # Produces dist/StemSplitter/ (Windows/Linux) or dist/StemSplitter.app (macOS).
 
+import json
+import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -12,6 +15,9 @@ APP = "StemSplitter"
 ROOT = Path(SPECPATH)
 IS_WIN = sys.platform.startswith("win")
 IS_MAC = sys.platform == "darwin"
+VERSION = re.search(r'__version__ = "([^"]+)"', (ROOT / "stemsplitter" / "__init__.py").read_text()).group(1)
+# set by the release workflow (the matrix name, e.g. Windows-x64): the app needs it to find its own update files
+PLATFORM = os.environ.get("STEMSPLITTER_PLATFORM", "")
 
 # --- bundle a static ffmpeg under the plain name "ffmpeg" (audio-separator calls it by name)
 import imageio_ffmpeg
@@ -23,6 +29,11 @@ shutil.copy2(imageio_ffmpeg.get_ffmpeg_exe(), ffmpeg_dst)
 ffmpeg_dst.chmod(0o755)
 
 datas = [(str(ROOT / "assets"), "assets")]
+if PLATFORM:
+    build_info = ROOT / "build" / "build-info.json"
+    build_info.parent.mkdir(parents=True, exist_ok=True)
+    build_info.write_text(json.dumps({"platform": PLATFORM}))
+    datas.append((str(build_info), "."))
 datas += collect_data_files("audio_separator")  # models.json, model-data.json, configs
 datas += collect_data_files("librosa")  # lazy_loader .pyi stubs + example registry
 for dist in ["audio-separator", "torch", "onnxruntime", "librosa", "numpy", "tqdm", "requests",
@@ -83,8 +94,8 @@ if IS_MAC:
         info_plist={
             "CFBundleName": APP,
             "CFBundleDisplayName": APP,
-            "CFBundleShortVersionString": "1.0.0",
-            "CFBundleVersion": "1.0.0",
+            "CFBundleShortVersionString": VERSION,
+            "CFBundleVersion": VERSION,
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "14.0",  # current PyTorch wheels need macOS 14+
             "NSRequiresAquaSystemAppearance": False,  # follow dark mode

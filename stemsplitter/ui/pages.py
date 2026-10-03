@@ -93,7 +93,7 @@ class BatchPage(QScrollArea):
 class SettingsPage(QScrollArea):
     """App-wide settings. The per-split options (folder, quality, format) are on the Split page."""
 
-    def __init__(self, reserves):
+    def __init__(self, reserves, version: str):
         super().__init__()
         card, lay = _card("Memory", "memory")
         lay.addSpacing(Spacing.XS)
@@ -115,9 +115,27 @@ class SettingsPage(QScrollArea):
             "Uses all the memory it wants and never waits for free memory: the fastest option, but the computer "
             "can slow down or swap, and the system may end the app if it runs out of memory (the split then "
             "resumes from its checkpoint). Use it only when nothing else important is running.", "hint", wrap=True))
+        updates, ul = _card("Updates", "refresh")
+        ul.addWidget(label(f"You have version {version}.", "body"))
+        self.chk_updates = QCheckBox("Check for updates when the app starts")
+        ul.addWidget(self.chk_updates)
+        ul.addWidget(label(
+            "When a new version is published, StemSplitter shows what changed and asks before updating. It then "
+            "downloads only the files that changed and restarts.", "hint", wrap=True))
+        ul.addSpacing(Spacing.XS)
+        row = QHBoxLayout()
+        row.setSpacing(Spacing.MD)
+        self.btn_check_updates = button("Check for updates", "refresh", None, Sizes.BUTTON_SMALL + 4)
+        row.addWidget(self.btn_check_updates)
+        self.update_status = label("", "hint", wrap=True)
+        row.addWidget(self.update_status, 1)
+        ul.addLayout(row)
         note = label("The output folder, quality and format are set on the Split page and are remembered "
                      "between sessions.", "muted", wrap=True)
-        fill_page(self, page_header("Settings", "Preferences that apply to every split."), card, note)
+        fill_page(self, page_header("Settings", "Preferences that apply to every split."), card, updates, note)
+
+    def set_update_status(self, text: str) -> None:
+        self.update_status.setText(text)
 
 
 class AboutPage(QScrollArea):

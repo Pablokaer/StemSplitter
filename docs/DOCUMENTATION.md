@@ -40,6 +40,7 @@ In short:
 - **Output:** one file per chosen stem, as MP3 (320, 256 or 192 kbps) or 24-bit WAV, in one subfolder per song (`Song/Song - Vocals.mp3`, …).
 - **Engine:** BS-RoFormer SW (all stems in one pass) and, in the *Maximum* preset, also MelBand-RoFormer for the vocals. The models run on PyTorch, on the NVIDIA (CUDA) or Apple (Metal) GPU, with an automatic fallback to the CPU.
 - **Interfaces:** a desktop window (PySide6/Qt), a command line (`--cli`) and a self-test (`--selftest`) used by CI.
+- **Updates:** the packaged app checks GitHub Releases for a new version, shows what changed and, if the user agrees, downloads only the files that changed and installs them ([section 2.7](#27-updates)).
 - **Memory:** the app never takes the memory the system needs to stay responsive. It speeds up when memory is free and slows down or waits when it is short, without losing work ([section 4.6](#46-memory-governor)).
 
 ---
@@ -65,10 +66,10 @@ A dark window with a purple accent, built like an audio production tool: a sideb
 - **Cancel:** stops at the next processed block of audio. Closing the window in the middle of a job asks for confirmation.
 - **Open output folder** with one click, in the processing card. On narrow windows, *Show log* and *Open output folder* show only their icon (with a tooltip).
 - **Locked while running:** as before, the queue can't be changed (no removing or clearing; the row × buttons are disabled) and the options are disabled; *Add Files* and *Add Folder* too. Songs can still be dropped onto the window.
-- **Batch page:** how the queue handles many songs, with *Add Folder* and *Go to Split* buttons. **Settings page:** *Keep free for the system*, how much memory StemSplitter must always leave to the rest of the computer (Automatic, or 1–8 GB), and *Ignore the memory limit*, which switches the limit off (the reserve is then greyed out). The window ships with *Ignore the memory limit* **ticked**: untick it to apply the reserve. See [section 4.6](#46-memory-governor). **About page:** version, models and licenses.
+- **Batch page:** how the queue handles many songs, with *Add Folder* and *Go to Split* buttons. **Settings page:** *Keep free for the system*, how much memory StemSplitter must always leave to the rest of the computer (Automatic, or 1–8 GB), and *Ignore the memory limit*, which switches the limit off (the reserve is then greyed out). The window ships with *Ignore the memory limit* **ticked**: untick it to apply the reserve. See [section 4.6](#46-memory-governor). The *Updates* card has the version, *Check for updates when the app starts* (ticked by default) and a *Check for updates* button with the result of the last check ([2.7](#27-updates)). **About page:** version, models and licenses.
 - **Memory in use** in the status bar while a queue runs, for example "Memory: 1.4 GB · limit 2.3 GB". When memory is short, the song's stage says "Waiting for free memory (N MB more needed)…" and the work continues as soon as memory frees up.
 - **Nothing is lost on a crash:** if the separation process dies (for example, the system ends it when memory runs out), the window starts it again and every song continues from its last checkpoint. A cancelled song also continues where it stopped when it is split again.
-- **Settings remembered between sessions:** output folder, quality (saved by preset name), format, the ticked stems (key `stems`, a comma-separated list of stem names), the memory reserve and the last input folder. Settings saved before the stem picker carry over: without a `stems` key the 4 stems are ticked, plus Instrumental and Guitar/Piano if the old `instrumental` and `guitar_piano` keys were on. If no stem is ticked when the window closes, the last saved choice is kept.
+- **Settings remembered between sessions:** output folder, quality (saved by preset name), format, the ticked stems (key `stems`, a comma-separated list of stem names), the memory reserve, the last input folder, the automatic update check (key `check_updates`, default `true`) and a version the user chose to skip (`skipped_version`). Settings saved before the stem picker carry over: without a `stems` key the 4 stems are ticked, plus Instrumental and Guitar/Piano if the old `instrumental` and `guitar_piano` keys were on. If no stem is ticked when the window closes, the last saved choice is kept.
 - **Look:** Qt's Fusion style with a style sheet built from the tokens in `stemsplitter/ui/theme.py` (colors, type sizes, spacing, radii), the same dark theme on every OS, and a dark title bar on Windows 11 and macOS (Qt 6.8+ color scheme). Font: Inter when installed, otherwise Segoe UI Variable / Segoe UI on Windows and the system font on macOS; no font is bundled. Icons are one outline family drawn from inline SVG (`stemsplitter/ui/icons.py`), with no icon files.
 
 ### 2.2 Quality presets
@@ -118,6 +119,14 @@ python main.py --cli song1.mp3 song2.flac -o output_folder \
 - **`STEMSPLITTER_THREADS=N`:** pins the number of CPU threads, for testing.
 - **`STEMSPLITTER_MEM_RESERVE_MB=N`:** sets the memory reserve (overrides the automatic one; the setting on the window's Settings page overrides this).
 - **`STEMSPLITTER_MEMLOG=1`:** logs the RAM (and the VRAM, once PyTorch is loaded) at every stage: worker started, audio decoded, model loaded, inference done, stems assembled, files written, queue finished and worker stopped.
+
+### 2.7 Updates
+
+- **Check:** 3 s after the window opens (if *Check for updates when the app starts* is ticked) and with *Check for updates* on the Settings page, the app asks the GitHub API for the latest published release of `Pablokaer/StemSplitter` and compares its tag with its own version. The result shows next to the button ("You have the latest version", "Version 1.1.0 is available", or why the check failed). Without a network connection nothing else happens.
+- **Pop-up:** when the release is newer, a dialog shows the version, the release notes (the release's description on GitHub, rendered as Markdown) and three buttons: *Skip this version* (not offered again at start-up; a manual check still shows it), *Later* and *Update now*. A release found while songs are being split is offered when the queue ends.
+- **Update now:** the app hashes its installed files, downloads only the files that differ from the new version (with a progress bar and *Cancel*), closes, and a small *Updating StemSplitter* window replaces the files, runs the new version's self-test and opens the app again. The app then says "StemSplitter was updated to version X". If the self-test fails, or a file can't be replaced, the previous version is put back and the app says why. A cancelled or failed download keeps what was already downloaded, and the next try continues from there.
+- **When the app can't update itself,** *Update now* becomes *Open download page* and the dialog says why: running from source (update with `git pull`), a build not made by the release workflow, a release without update files for this build (for example the CPU-only Windows build, which is not attached to releases), or a folder the app can't write to (for example `C:\Program Files`).
+- **Measured** (Windows 11, i5-12500H; a test build of the window without PyTorch (PyInstaller, 156 files, 0.13 GB; a 49.5 MB release archive in 3 parts), served by a local web server that answers range requests behind a redirect like GitHub): updating to a version whose only changed file is the executable downloaded 6.7 MB (the executable, 5.6 MB compressed, and the last 1 MB of the archive, which holds its directory) instead of the 49.5 MB archive; the new version was running and showing its message 4 s after *Update now* (with a stubbed self-test). A version whose self-test failed was rolled back to files bit-identical to the previous version, and the app reopened with the error 21 s after *Update now*. Not measured yet on a real release build (2+ GB, thousands of files), where hashing the installed files and the real self-test take longer.
 
 ---
 
@@ -335,13 +344,16 @@ With memory to spare, *Maximum* still peaks about as high as before: with a rela
 
 | File | Responsibility |
 |---|---|
-| `main.py` | Entry point: window (default), `--cli` and `--selftest` |
+| `main.py` | Entry point: window (default), `--cli`, `--selftest` and `--apply-update` (the update helper) |
 | `stemsplitter/engine.py` | The whole audio pipeline: presets, models, decoding, separation, stem assembly and writing |
 | `stemsplitter/gui.py` | The window's logic (queue, settings, run, progress) and the `EngineProcess`, which starts and stops the worker |
 | `stemsplitter/ui/theme.py` | Design tokens (colors, type sizes, spacing, radii, window sizes) and the Qt style sheet built from them |
 | `stemsplitter/ui/icons.py` | The outline icon set and the app mark, drawn from inline SVG with QtSvg |
 | `stemsplitter/ui/widgets.py` | The window's components: `Sidebar`, `DropZone`, `FileQueue`/`FileList`/`FileRow`, `OutputSettings`, `ProcessingPanel`, `StatusBar` and small helpers. They show state and emit signals; they don't know about the engine |
 | `stemsplitter/ui/pages.py` | The Batch, Settings and About pages |
+| `stemsplitter/ui/update_dialog.py` | The update dialog (release notes, download progress) and the helper's *Updating StemSplitter* window |
+| `stemsplitter/updater.py` | Self-update: release check, file index, plan, range downloads from the release archive, install, rollback ([5.7](#57-self-update)) |
+| `stemsplitter/release.py` | Release tools for CI: the tag/version check, the file index and the archive check (`python -m stemsplitter.release`) |
 | `stemsplitter/worker.py` | Worker process: runs the queue on the engine and sends progress, logs and results to the GUI |
 | `stemsplitter/memgov.py` | The memory governor: budget, levels, waiting, macOS memory pressure ([4.6](#46-memory-governor)) |
 | `stemsplitter/memory.py` | Memory measurement for debugging (`STEMSPLITTER_MEMLOG=1`) |
@@ -352,6 +364,7 @@ With memory to spare, *Maximum* still peaks about as high as before: with a rela
 | `ruff.toml` | Lint rules (real errors only) |
 | `CLAUDE.md` | Project rules for Claude Code: everything in English, and every relevant change documented |
 | `tools/make_icon.py` | Generates the icons in `assets/` |
+| `tests/test_updater.py` | Self-update tests: versions, index checks, plan, full and partial installs from a split zip, rollback, crash recovery, paths over 260 characters, range downloads over HTTP (standard library only) |
 | `tests/test_engine.py`, `tests/golden_fake.json` | Engine regression tests with a fake network: every written file compared byte for byte with a golden output ([7.3](#73-measuring-quality-and-speed)) |
 | `benchmarks/` | `fake_model.py` (the fake network), `bench_engine.py` (chunk loop, per-song tail, batch) and `golden.py` (golden output with the real models) |
 
@@ -423,6 +436,8 @@ engine.close()
 | Worker process, *writer* (1 thread) | `engine.write_stems()` for the previous song (assembling its stems, then encoding them) and its done event |
 | Worker process, encoder *pool* (up to N threads) | One ffmpeg/LAME process per stem, as many at once as the governor allows |
 | Worker process, *memory governor* (1 thread) | Samples the memory every 250 ms and sends a `memory` event about once a second while busy |
+| GUI process, *update* thread (while it runs) | The update check, and after *Update now* the hashing, download and helper start ([5.7](#57-self-update)) |
+| Update helper process (`--apply-update`) | A hard-linked copy of the app that replaces the files after the app quits, self-tests the new version and starts it ([5.7](#57-self-update)) |
 
 - **Communication:** two `multiprocessing.Queue`s (*spawn* context). The worker receives the commands `("prepare", quality, reserve_mb, unlimited)` (preload), `("run", jobs, opts)` (process the queue) and `None` (quit). It sends back the events `status`, `done`, `failed`, `log`, `device`, `memory`, `prepared` and `finished`, delivered in the order they were emitted. Consecutive progress updates for the same song are coalesced.
 - **Lifecycle:** the worker is created when songs are added and loads the preset's model right away (`prepare`, only if the model is already downloaded). It waits up to 90 s for *Split Stems* (`PREWARM_IDLE_SECONDS`), is reused by any queue started within 30 s after a queue ends (`IDLE_SECONDS`), and quits after that or when the window closes. If the process dies midway (for example, ended by the OS when memory runs out), the window starts it again with the songs that were left, each continuing from its checkpoint (`MAX_RESTARTS` = 3 per queue); after that, the remaining songs show as failed and the window keeps working.
@@ -442,6 +457,27 @@ engine.close()
 
 The handler on the `audio_separator` logger only forwards warnings and useful messages (download, device) to the window and filters out noise, such as the ONNX Runtime notice, which is irrelevant because both models run on PyTorch. At the end of every song a line with the time of each stage is added, for example `Song: 77s (decode 0.6s, stems 70.8s, encode 4.5s)`.
 
+### 5.7 Self-update
+
+`stemsplitter/updater.py` (logic, standard library only) and `stemsplitter/ui/update_dialog.py` (the dialogs, which run the logic on a thread). The user-facing behavior is in [2.7](#27-updates).
+
+**What a release holds per platform** (made by CI, [6.3](#63-ci-githubworkflowsbuildyml)):
+- `StemSplitter-<platform>.zip`, or on Windows `StemSplitter-<platform>.zip.001`, `.002`, …: the build as a zip (7-Zip on Windows, cut into 1.9 GB parts with `-v1900m`; `ditto` on macOS). The parts are a plain split, so their concatenation is the zip.
+- `StemSplitter-<platform>.files.json`, the **file index**: format, version, platform, the top folder in the archive (`StemSplitter` or `StemSplitter.app`), and for every file its path, size and SHA-256 (plus `exec` for executable files on macOS, and `link` for symlinks).
+- The platform is the CI matrix name (`Windows-x64`, `macOS-AppleSilicon`), written into the build as `build-info.json`; a build without it can't update itself.
+
+**Steps:**
+1. **Check** (`fetch_latest`): `GET https://api.github.com/repos/Pablokaer/StemSplitter/releases/latest` (drafts and pre-releases are never returned; a 404 means no release yet). The tag is compared with `__version__` numerically (`v1.10.0` > `1.9.9`). `STEMSPLITTER_UPDATE_API` points the check at another server, for tests.
+2. **Plan** (`make_plan`): the index is downloaded and checked (format, platform, version, and every path must stay inside the app: no `..`, absolute paths, drive letters or backslashes; links must point inside it). Installed files whose size matches are hashed; the others differ anyway. A path is *added* (missing), *replaced* (differs) or *removed*: an installed file the index doesn't list, but only inside the build's own folders (`_internal` on Windows, `Contents` on macOS), so a file the user put next to the executable is never touched. Files already staged by an earlier attempt with the right hash are not downloaded again.
+3. **Download** (`download`): zipfile reads the archive's central directory through a file object that fetches byte ranges on demand (the first read takes the last 1 MB). Each needed member is then fetched with a range request across the parts (members less than 4 MB apart share one request), inflated with a bounded buffer, and written as `<file>.part`; it is renamed into place only if its size and SHA-256 match the index. Requests follow GitHub's redirect to its download host, only over HTTPS (plain HTTP only to this computer, for tests), and are retried up to 4 times from where they stopped. The free disk space next to the app is checked first. Certificates: the Windows certificate store, and certifi's bundle on macOS.
+4. **Handover** (`start_install`): the running app can't replace its own files. PyInstaller reads the app's Python code from the executable while it runs, and a test showed that once the executable is replaced, the next import fails (`Error -5 while decompressing data`). So the app makes a copy of itself out of **hard links** (`clone_tree`: no data copied; plain copies on drives without hard links), writes `plan.json`, starts the copy with `--apply-update <work folder>` and quits.
+5. **Install** (`install`, in the helper): it waits up to 120 s for the app's process to exit, writes `state.json` = applying, and moves files: removed files to the backup folder, each replaced file to the backup and its new version in right after (so the executable is never missing for more than a moment), then the added files. It runs `<app> --selftest` (up to 15 min: the first start of new DLLs can be slow while the antivirus scans them). If the self-test fails or a move fails, `rollback` puts everything back. It writes `result.json` and starts the app (`open -n` on macOS).
+6. **Result** (`take_result`, when the window opens): the app shows the result once and removes the work folder in the background (retrying while the helper exits). If `state.json` still says applying and the helper is gone (a crash or power cut during the install), `recover` rolls back first, before the window is built.
+
+**The work folder** is `.ss-update` next to the app (same drive, so every move is a rename): `n/` staged new files, `o/` the old files moved aside, `h/` the helper copy (`h/StemSplitter.app` on macOS), and `plan.json`, `state.json`, `result.json`. The short names keep the helper's paths as long as the app's own (`.ss-update\h` vs `StemSplitter`): on Windows a longer path could cross the 260-character limit when the helper loads its DLLs, which an end-to-end test hit with the old, longer names. All of the updater's file operations also use Windows extended-length paths (`\\?\`), so deep files work in folders with long paths. `rollback` is idempotent and decides from what is on disk, so it also undoes a partial install. Two copies of the app in the same folder share the work folder; each only acts on a `plan.json` whose app path is its own.
+
+**What was tested** (Windows 11, i5-12500H; a test build of the window without PyTorch (PyInstaller, 156 files, 0.13 GB; a 49.5 MB release archive in 3 parts), served by a local web server that answers range requests behind a redirect like GitHub): v1.0.0 → v1.0.1 through the real dialog (clicked with Windows UI Automation): the helper replaced the files, ran the self-test, reopened the new version and removed the work folder, and the installed files matched the index; v1.0.1 → a v1.0.2 whose self-test fails: the files were rolled back bit-identical to v1.0.1. Also on Windows: a running PyInstaller app renamed its own executable, loaded DLLs and `.pyd` files without errors, and hard-linked them while in use. The macOS path (symlinks in the bundle, `ditto` archives, `open -n`) is covered by CI's archive check and self-test of the installed copy, but has not run on a Mac by hand.
+
 ---
 
 ## 6. Platforms, packaging and CI
@@ -459,7 +495,8 @@ The handler on the `audio_separator` logger only forwards warnings and useful me
 - **ffmpeg:** the static binary from `imageio-ffmpeg` is bundled under the name `ffmpeg`.
 - **Data and metadata:** those of `audio_separator` (model catalog) and `librosa`, plus the metadata of packages that read their own version.
 - **Exclusions:** unused packages (tkinter, matplotlib, torchaudio, triton…) and **`pkg_resources`**. setuptools 82+ removed that module, an empty folder left on the runner made the `pyi_rth_pkgres` hook crash the app on macOS, and nothing in the app needs it.
-- **Mac:** `Info.plist` with `LSMinimumSystemVersion` 14.0 and dark mode support.
+- **Mac:** `Info.plist` with `LSMinimumSystemVersion` 14.0 and dark mode support; its version is `__version__` from `stemsplitter/__init__.py`.
+- **`build-info.json`:** when `STEMSPLITTER_PLATFORM` is set (CI sets it to the matrix name), the spec writes `{"platform": ...}` into the build. The updater uses it to find this build's files in a release; local builds don't have it and can't update themselves.
 
 ### 6.3 CI (`.github/workflows/build.yml`)
 
@@ -468,23 +505,25 @@ The handler on the `audio_separator` logger only forwards warnings and useful me
 | Push to any branch (except commits that only touch `.md` or `tools/`) | Lint and the builds with the self-test. A newer push to the same branch cancels the previous build |
 | PR from a fork | The same |
 | Manual **Run workflow** | Builds with downloadable files; option for the CPU-only build |
-| `v*` tag | Builds and a GitHub Release |
+| `v*` tag | Builds and a GitHub Release: created as a draft, filled by each build, and published only when every build passed |
 
 The stages:
 
-1. **Lint** (~30 s): `ruff` with real-error rules only (`E9`, `F`) and `compileall`. The long builds only start if the lint passes.
+1. **Lint** (~30 s): `ruff` with real-error rules only (`E9`, `F`), `compileall` and the updater tests (`tests/test_updater.py`, standard library only). On a tag it also checks that the tag matches `__version__` (`python -m stemsplitter.release check-version`; `v1.2.0` needs `__version__ = "1.2.0"`) and creates the **draft** release with notes generated from the merged PRs and commits (`gh release create --draft --generate-notes`). The long builds only start if the lint passes.
 2. **Matrix builds:**
    - `Windows-x64`: PyTorch **CUDA 13.0**; uses the NVIDIA GPU and falls back to the CPU without one.
    - `macOS-AppleSilicon`: default PyTorch, with Metal.
    - `Windows-x64-CPU` (optional): smaller, CPU only. It only builds on a manual run with the option ticked; in other runs its steps are skipped and the job shows as passed **without having built anything**.
 3. **Self-test of the packaged app:** `StemSplitter --selftest` imports PyTorch and `audio-separator`, runs ffmpeg, starts and stops a worker process, checks that the memory governor can read the memory figures (`psutil` bundled) and writes `selftest.txt`, which includes the CUDA version. On the Mac the app is also signed ad hoc and, if the self-test fails, the error (`selftest.txt`, the app's output and `stemsplitter.log`) is published as a GitHub Actions **annotation**, which can be read without signing in (the job log requires signing in).
-4. **Downloadable files:** one zip per platform (manual runs and tags only).
-5. **Release:** the CUDA Windows build is larger than 2 GB, the GitHub Releases limit, so it ships as 7-Zip parts `.7z.001`, `.002`, …
+4. **Package and check for the updater** (every build): Windows: a zip made by 7-Zip and cut into 1.9 GB parts (`StemSplitter-<platform>.zip.001`, `.002`, …), because GitHub Releases reject files over 2 GB and the CUDA build is bigger; macOS: `ditto` into `StemSplitter-<platform>.zip`. Then the file index (`python -m stemsplitter.release index`) and the archive check (`… release verify`), which uses the updater's own code: it installs the whole build from the archive into an empty folder, damages that copy (one file deleted, one changed, a stray file added) and updates it again, and after each step the copy must match the index exactly. Finally `--selftest` runs on that installed copy, so a release whose archive can't be installed by the updater (or that doesn't run once installed) fails here.
+5. **Downloadable files:** the `release/` folder (the archive or its parts, and the index) as one artifact per platform (manual runs and tags only).
+6. **Release** (tags): each build uploads its files to the draft (`gh release upload`); the `publish` job then makes it public and *latest*, only if every build passed. Until then no app is offered the version, so nobody gets a release whose files for their platform are missing. The CPU-only build is never attached.
 
 ### 6.4 First launch for the end user
 
 - **Windows SmartScreen:** the app isn't signed, so click **More info → Run anyway**.
 - **macOS Gatekeeper:** right-click → **Open**. If macOS says the app is "damaged": `xattr -dr com.apple.quarantine /Applications/StemSplitter.app`.
+- **Updates:** the files the updater writes are not marked as downloaded from the internet (it doesn't add the Windows *Mark of the Web* or the macOS quarantine attribute, which browsers add), so the warnings above should not come back after an update. Not yet confirmed on a real release.
 
 ---
 
@@ -522,6 +561,8 @@ The method of section 3.2 is easy to repeat:
 
 For speed, the log already has the time of every stage. For fine measurements, synchronize the GPU (`torch.cuda.synchronize()`) before every time reading and **close other programs that use the GPU**. Check that the GPU is not held back by the system first: `nvidia-smi -q -d POWER,CLOCK` must not show a reduced *Current Power Limit* or an active *SW Power Cap*. On a laptop in a power-saving mode the limit can drop to 10 W (from 80 W), which made every split ~20× slower and every GPU timing meaningless.
 
+**Updater tests.** `python -m unittest discover -s tests -p test_updater.py -v` (a few seconds, standard library only; CI runs them in the lint job). To try the whole update by hand, point a packaged build at a local server with `STEMSPLITTER_UPDATE_API=http://127.0.0.1:<port>/…` that serves a release in the GitHub API format; `tests/test_updater.py` has a server (`_RangeHandler`) that does this.
+
 **Regression tests and benchmarks.** Changes to the engine must keep the output identical, and these check it:
 
 ```bash
@@ -535,7 +576,15 @@ python benchmarks/bench_engine.py loop|tail|batch    # timings, median of severa
 - `benchmarks/golden.py` splits a synthetic 12 s clip (peak 1.3, so the gain path runs) with the real models in four configurations (Balanced and Maximum with all 8 stems, Fast with 4 stems as MP3, Maximum with only No Drums) and hashes every file. `STEMSPLITTER_GOLDEN_DEVICE=cpu` runs it on the CPU, which is deterministic and does not depend on the GPU's clocks; it takes ~7 min on an i5-12500H. (`CUDA_VISIBLE_DEVICES` cannot hide the GPU there: an empty value is dropped on Windows and `-1` made `torch.cuda.is_available()` crash with driver 580.97 and torch 2.14.1, so the script hides it inside the process.)
 - `benchmarks/bench_engine.py`: `loop` times the stem pass of a 4-minute song with a network that costs nothing, i.e. the per-chunk work outside the network, which on a GPU leaves the GPU idle; `tail` times the assembly and the writing of one song; `batch` runs `worker.run_jobs` over several songs with a network that sleeps per chunk like a busy GPU, to show how much CPU work overlaps it.
 
-### 7.4 Extension points
+### 7.4 Publishing a release
+
+1. Set the new version in `stemsplitter/__init__.py` (`__version__ = "1.1.0"`) and commit it.
+2. `git tag v1.1.0 && git push origin v1.1.0`. The tag must match the version, or the lint job fails before anything is built.
+3. CI builds both platforms, checks their archives and publishes the release when both pass. Edit the release notes on GitHub (before or after publishing): they are what the update dialog shows.
+
+Apps already installed see the release at their next start (or *Check for updates*) and update themselves.
+
+### 7.5 Extension points
 
 - **New preset:** add a `Preset` to `QUALITY_PRESETS` (`engine.py`) and entries to `QUALITIES` and `QUALITY_HINTS` (`gui.py`).
 - **Look of the window:** colors, sizes and spacing are tokens in `stemsplitter/ui/theme.py`; new icons are SVG shapes in `_SHAPES` (`stemsplitter/ui/icons.py`). A new sidebar page is an entry in `Sidebar.PAGES` and a widget added to the window's page stack in the same order.
@@ -555,6 +604,10 @@ python benchmarks/bench_engine.py loop|tail|batch    # timings, median of severa
 - **Apple Silicon:** works, but the timings have not been measured yet. The memory governor's macOS parts (memory pressure level, the Apple GPU cap) are only covered by the CI build and self-test, not by a run on a Mac.
 - **Disk space:** a song being split needs up to ~0.3 GB per minute in the data folder until its files are written.
 - **Unsigned apps:** public distribution would need an Apple Developer ID (with notarization) and a Windows code-signing certificate.
+- **Updates are only as safe as the GitHub account:** the updater checks every file against the release's index (SHA-256) and downloads only over HTTPS, but the index is not signed, so anyone who can publish a release in the repository can ship an update. A signed index (a key kept outside GitHub) would close that.
+- **Self-update needs a writable folder:** the app's folder and the folder that contains it (for the `.ss-update` work folder). An app in `C:\Program Files` or, for a standard macOS user, in `/Applications`, gets the download page instead. Builds not made by the release workflow, the CPU-only Windows build and copies running from source can't update themselves either.
+- **Granularity of updates:** a changed file is downloaded whole. The executable holds all of the app's Python code (and that of its pure-Python dependencies), so any code change downloads it; its size in the real build has not been measured. A new PyTorch version replaces most of the build (~2.5 GB). Each update first hashes the installed files (several GB in the CUDA build; not timed yet).
+- **Self-update on macOS** has only been checked by CI (archive check and self-test of the installed copy), not yet on a Mac.
 - **Licenses:** the code belongs to the project. Components: python-audio-separator (MIT), PyTorch (BSD), PySide6/Qt (LGPL-3, dynamically linked), FFmpeg (GPL; include the license and a link to its source code if you distribute it) and the models (check each one's license before any commercial use).
 
 ---
@@ -585,4 +638,5 @@ python benchmarks/bench_engine.py loop|tail|batch    # timings, median of severa
 | `e0b1c17` | In a batch the stems are assembled on the writer thread (`split(..., assemble=False)` in the worker and the CLI), so the next song reaches the GPU sooner: 3 songs of 4 min with 4 stems 93.5 → 88.8 s (emulated GPU); output bit-identical |
 | `10d65a0` | New work tracks are empty files that grow as they are written, instead of being pre-filled with zeros by `truncate()` (not sparse on NTFS): assembly of a 4-minute song with 4 stems 1.58 → 0.90 s, ~85 MB less disk writing per track; output bit-identical |
 | `8d6b166` | Review fixes: the same file twice in a row in a batch (CLI) waits for the first instead of failing on its removed work folder; a step recorded as done whose file came out short (power cut) runs again instead of failing on every retry (or, for the final stems, writing wrong files); `WORK_VERSION` 1 → 2. Tests for both, and the regression tests now hash the exact float32 samples |
-| — | The window always opens at its minimum size (1100×700, reduced to fit smaller screens) and centered on the primary screen, title bar included; it used to open at 1400×850 in the position chosen by the system |
+| `dbd9dfc` | The window always opens at its minimum size (1100×700, reduced to fit smaller screens) and centered on the primary screen, title bar included; it used to open at 1400×850 in the position chosen by the system |
+| — | Self-update: the app checks GitHub Releases at start-up and from *Settings → Updates*, shows the release notes, and on *Update now* downloads only the files that changed (range requests into the release zip, checked against a SHA-256 file index), installs them from a hard-linked helper copy, runs the new version's self-test and rolls back if it fails. Releases: Windows ships as `.zip.001`, `.002`, … instead of `.7z.001`, …, each release has a `.files.json` index per platform, CI checks every archive with the updater's own code and self-tests the installed copy, and a tag release stays a draft until every build passed. The tag must match `__version__`, which also sets the macOS bundle version |

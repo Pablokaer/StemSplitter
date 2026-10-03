@@ -25,10 +25,12 @@ from PySide6.QtWidgets import (
 )
 
 from . import APP_NAME, __version__
+from . import updater
 from .memory import memlog
 from .platform_utils import default_output_dir, open_folder
 from .ui.pages import AboutPage, BatchPage, SettingsPage
 from .ui.theme import Sizes, Spacing, Type, dark_palette, pick_font_family, stylesheet
+from .ui.update_dialog import Task, UpdateDialog
 from .ui.widgets import (
     DropZone,
     FileList,
@@ -292,9 +294,14 @@ class MainWindow(QMainWindow):
         self._current_row: int | None = None  # the song the processing panel follows
         self._timing: dict[int, tuple[float, float]] = {}  # row -> (time, fraction) the time left is measured from
         self._panel_ready = True  # the panel shows the queue summary (not a finished batch's result)
+        self._update_task: Task | None = None
+        self._manual_check = False
+        self._pending_release: updater.Release | None = None  # found while a batch ran: offered when it ends
         self._build_ui()
         self._load_settings()
         memlog("window created (GUI process)", self._append_log)
+        if self.chk_updates.isChecked():
+            QTimer.singleShot(3000, self._check_updates)
 
     def _fit_to_screen(self):
         """Open at the minimum size; `center_on_screen` places the window once the UI is built."""
@@ -336,9 +343,11 @@ class MainWindow(QMainWindow):
         self.batch_page.btn_folder.clicked.connect(self._pick_folder)
         self.batch_page.btn_split.clicked.connect(lambda: self.sidebar.select(self.PAGE_SPLIT))
         self.pages.addWidget(self.batch_page)
-        self.settings_page = SettingsPage(RESERVES)
+        self.settings_page = SettingsPage(RESERVES, __version__)
         self.reserve = self.settings_page.reserve
         self.chk_unlimited = self.settings_page.chk_unlimited
+        self.chk_updates = self.settings_page.chk_updates
+        self.settings_page.btn_check_updates.clicked.connect(lambda: self._check_updates(manual=True))
         self.pages.addWidget(self.settings_page)
         self.pages.addWidget(AboutPage(APP_NAME, __version__))
         self.sidebar.page_changed.connect(self.pages.setCurrentIndex)
@@ -458,6 +467,7 @@ class MainWindow(QMainWindow):
             chk.setChecked(name in stems)
         self.reserve.setCurrentIndex(max(0, self.reserve.findData(int(self.settings.value("memory_reserve_mb", 0)))))
         self.chk_unlimited.setChecked(self.settings.value("ignore_memory_limit", "true") == "true")  # on by default
+        self.chk_updates.setChecked(self.settings.value("check_updates", "true") == "true")
         self._on_options_changed()
 
     def _save_settings(self):
@@ -468,6 +478,7 @@ class MainWindow(QMainWindow):
             self.settings.setValue("stems", ",".join(self._selected_stems()))
         self.settings.setValue("memory_reserve_mb", self.reserve.currentData())
         self.settings.setValue("ignore_memory_limit", "true" if self.chk_unlimited.isChecked() else "false")
+        self.settings.setValue("check_updates", "true" if self.chk_updates.isChecked() else "false")
 
     def _selected_stems(self) -> list[str]:
         return [name for name, chk in self.stem_checks.items() if chk.isChecked()]
@@ -710,6 +721,67 @@ class MainWindow(QMainWindow):
                 self.btn_log.setChecked(True)
         else:
             self.panel.set_message(f"All done — {done} song(s) split", f"Saved to {self.out_edit.text()}", 1000)
+        if self._pending_release is not None:
+            release, self._pending_release = self._pending_release, None
+            self._show_update(release)
+
+    # -- updates ------------------------------------------------------------------------
+    def _check_updates(self, manual: bool = False):
+        """Ask GitHub for the latest release (on a thread). At start-up a skipped version is not offered again."""
+        if self._update_task is not None:
+            return
+        self._manual_check = manual
+        self.settings_page.set_update_status("Checking for updates…")
+        self.settings_page.btn_check_updates.setEnabled(False)
+        self._update_task = Task(lambda progress, cancel: updater.fetch_latest(), self)
+        self._update_task.done.connect(self._on_update_checked, Qt.QueuedConnection)
+        self._update_task.failed.connect(self._on_update_check_failed, Qt.QueuedConnection)
+        self._update_task.start()
+
+    @Slot(object)
+    def _on_update_checked(self, release):
+        self._update_task = None
+        self.settings_page.btn_check_updates.setEnabled(True)
+        when = time.strftime("%H:%M")
+        if release is None or not updater.is_newer(release.version):
+            self.settings_page.set_update_status(f"You have the latest version (checked at {when}).")
+            return
+        self.settings_page.set_update_status(f"Version {release.version} is available (checked at {when}).")
+        self._append_log(f"Version {release.version} is available ({release.page})")
+        if not self._manual_check and self.settings.value("skipped_version", "") == release.version:
+            return
+        if self._busy() and not self._manual_check:  # don't interrupt a batch: offer it when the batch ends
+            self._pending_release = release
+            return
+        self._show_update(release)
+
+    @Slot(str)
+    def _on_update_check_failed(self, message: str):
+        self._update_task = None
+        self.settings_page.btn_check_updates.setEnabled(True)
+        self.settings_page.set_update_status(f"Couldn't check for updates: {message}")
+        self._append_log(f"Update check failed: {message}")
+
+    def _show_update(self, release):
+        dlg = UpdateDialog(release, self, busy=self._busy, quit_app=self.close)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.skip_requested.connect(self._skip_version)
+        dlg.open()
+
+    @Slot(str)
+    def _skip_version(self, version: str):
+        self.settings.setValue("skipped_version", version)
+
+    def show_update_result(self, result: dict):
+        """Once, after the installer restarted the app."""
+        version, previous = result.get("version", "?"), result.get("from", "?")
+        if result.get("ok"):
+            self._append_log(f"Updated from version {previous} to {version}")
+            QMessageBox.information(self, APP_NAME, f"{APP_NAME} was updated to version {version}.")
+        else:
+            message = result.get("message", "")
+            self._append_log(f"The update to version {version} failed: {message}")
+            QMessageBox.warning(self, APP_NAME, f"The update to version {version} was not installed.\n\n{message}")
 
     @Slot(str)
     def _append_log(self, text: str):
@@ -731,7 +803,8 @@ class MainWindow(QMainWindow):
 
 
 # --------------------------------------------------------------------------------------
-def run_gui() -> int:
+def make_app() -> QApplication:
+    """The QApplication with the app's style (also used by the update helper's window)."""
     QApplication.setApplicationName(APP_NAME)
     QApplication.setOrganizationName(APP_NAME)
     app = QApplication(sys.argv)
@@ -749,7 +822,18 @@ def run_gui() -> int:
     if icon.exists():
         app.setWindowIcon(QIcon(str(icon)))
     app.setStyleSheet(stylesheet())
+    return app
+
+
+def run_gui() -> int:
+    inst = updater.Installation.current()
+    if inst is not None:
+        updater.recover(inst.root)  # an update interrupted by a crash or a power cut is undone first
+    app = make_app()
     win = MainWindow()
     win.center_on_screen()  # after the whole UI is built, so the size is final
     win.show()
+    result = updater.take_result(inst.root) if inst is not None else None
+    if result:
+        QTimer.singleShot(0, lambda: win.show_update_result(result))
     return app.exec()
