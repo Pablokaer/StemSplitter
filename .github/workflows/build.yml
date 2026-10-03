@@ -40,6 +40,21 @@ jobs:
         run: pipx run ruff==0.16.9 check --output-format=github .
       - name: Byte-compile
         run: python -m compileall -q main.py stemsplitter StemSplitter.spec
+      - name: Updater tests (standard library only)
+        run: python -m unittest discover -s tests -p test_updater.py -v
+      - name: Check the tag matches the app version (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: python -m stemsplitter.release check-version "$GITHUB_REF_NAME"
+      - name: Create the draft release (tags only)
+        # a draft is invisible to the apps' update check until the publish job below makes it public,
+        # so nobody is offered a release whose files for their platform are still being built
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --draft --generate-notes --title "StemSplitter ${GITHUB_REF_NAME#v}"
 
   build:
     needs: lint
@@ -97,6 +112,8 @@ jobs:
       - name: Build with PyInstaller
         if: steps.gate.outputs.skip != 'true'
         shell: bash
+        env:
+          STEMSPLITTER_PLATFORM: ${{ matrix.name }}   # written into the build: the app finds its update files by it
         run: pyinstaller --noconfirm StemSplitter.spec
 
       - name: Self-test packaged app (Windows)
@@ -133,39 +150,81 @@ jobs:
           exit $code
 
       - name: Package (Windows)
+        # a zip cut in 1.9 GB parts (.zip.001, .002, …): GitHub Releases reject files over 2 GB and the CUDA build
+        # is bigger. 7-Zip opens the parts directly, and the app's updater reads them with range requests.
         if: steps.gate.outputs.skip != 'true' && runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path dist\StemSplitter -DestinationPath "StemSplitter-${{ matrix.name }}.zip"
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          7z a -tzip -mm=Deflate -mx=5 -v1900m "release\StemSplitter-${{ matrix.name }}.zip" .\dist\StemSplitter
 
       - name: Package (macOS)
         if: steps.gate.outputs.skip != 'true' && runner.os == 'macOS'
         shell: bash
-        run: ditto -c -k --sequesterRsrc --keepParent dist/StemSplitter.app "StemSplitter-${{ matrix.name }}.zip"
+        run: |
+          mkdir -p release
+          ditto -c -k --sequesterRsrc --keepParent dist/StemSplitter.app "release/StemSplitter-${{ matrix.name }}.zip"
+
+      - name: File index for the updater
+        if: steps.gate.outputs.skip != 'true'
+        shell: bash
+        run: |
+          build=dist/StemSplitter
+          if [[ "$RUNNER_OS" == "macOS" ]]; then build=dist/StemSplitter.app; fi
+          python -m stemsplitter.release index "$build" --platform "${{ matrix.name }}" -o release
+
+      - name: Check the archive with the updater's own code
+        # installs the build from the archive into an empty folder, then damages that copy and updates it again
+        if: steps.gate.outputs.skip != 'true'
+        shell: bash
+        run: python -m stemsplitter.release verify "release/StemSplitter-${{ matrix.name }}.files.json" --into verify
+
+      - name: Self-test the copy installed from the archive (Windows)
+        if: steps.gate.outputs.skip != 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "verify\StemSplitter\StemSplitter.exe" -ArgumentList "--selftest" -Wait -PassThru
+          Get-Content "$env:LOCALAPPDATA\StemSplitter\selftest.txt"
+          if ($p.ExitCode -ne 0) { exit 1 }
+
+      - name: Self-test the copy installed from the archive (macOS)
+        if: steps.gate.outputs.skip != 'true' && runner.os == 'macOS'
+        shell: bash
+        run: |
+          code=0
+          verify/StemSplitter.app/Contents/MacOS/StemSplitter --selftest > verify-output.txt 2>&1 || code=$?
+          cat verify-output.txt
+          cat "$HOME/Library/Application Support/StemSplitter/selftest.txt" || true
+          if [[ $code -ne 0 ]]; then
+            echo "::error title=macOS self-test of the copy installed from the archive failed::exit code $code"
+          fi
+          exit $code
 
       - uses: actions/upload-artifact@v4
         # branch builds only need to pass; downloads are kept for releases and manual runs
         if: steps.gate.outputs.skip != 'true' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/'))
         with:
           name: StemSplitter-${{ matrix.name }}
-          path: StemSplitter-${{ matrix.name }}.zip
+          path: release/
           compression-level: 0
           retention-days: 30
 
-      - name: Split large archive for the release (Windows CUDA build)
-        # GitHub Releases reject files over 2 GB and the CUDA build is bigger, so it is
-        # attached as a multi-part 7-Zip archive (.7z.001, .7z.002, ...).
-        if: steps.gate.outputs.skip != 'true' && !matrix.optional && runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
-        run: 7z a -t7z -mx=5 -v1900m "release\StemSplitter-${{ matrix.name }}.7z" .\dist\StemSplitter
+      - name: Attach to the draft release
+        if: steps.gate.outputs.skip != 'true' && !matrix.optional && startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$GITHUB_REF_NAME" release/* --clobber
 
-      - name: Attach to GitHub Release (Windows)
-        if: steps.gate.outputs.skip != 'true' && !matrix.optional && runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release/StemSplitter-${{ matrix.name }}.7z.*
-
-      - name: Attach to GitHub Release (macOS)
-        if: steps.gate.outputs.skip != 'true' && !matrix.optional && runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: StemSplitter-${{ matrix.name }}.zip
+  publish:
+    # only when every build passed: until then the release stays a draft that no app is offered
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest

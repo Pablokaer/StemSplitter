@@ -23,6 +23,7 @@ You tick which of these to write, from a single one (for example only **No Drums
 * **Batch processing**: drop files or whole folders. Each song shows its own status, a broken file doesn't stop the batch, and the next song is separated while the previous one is written to disk.
 * **Output**: MP3 at 320, 256 or 192 kbps, or 24-bit WAV, in one subfolder per song. The stems add back up to the original song exactly.
 * **Easy to use**: a dark, modern window with a drop area, a queue that shows each song's state and time left, a processing card with the progress and a *Cancel* button, and a status bar with the device in use. There is a log with the time of every step, and your settings are remembered. The models download themselves on first use, with progress shown.
+* **Updates itself**: when a new version is published it shows what changed and asks. *Update now* downloads only the files that changed, installs them, checks the new version and restarts; if the check fails, your current version is kept. You can also check by hand on the Settings page.
 * **Command line** for scripting and batches (`--cli`), and a self-test (`--selftest`) used by CI.
 
 ## How it gets such clean stems
@@ -48,12 +49,14 @@ The apps are built for you by GitHub Actions (free), because a Windows build has
 
 1. The builds run in the GitHub repository (for a copy of your own, create a **private** repository and push this folder to it).
 2. Open the **Actions** tab → **Build desktop apps** → **Run workflow**.
-   *Or* create a release tag (`git tag v1.0.0 && git push --tags`) and the downloads are attached to a GitHub Release automatically.
+   *Or* publish a release: set the version in `stemsplitter/__init__.py`, then `git tag v1.0.0 && git push --tags` (the tag must match that version). The release is published when both builds pass, and installed apps are offered the update.
    (Every push is also linted, built and self-tested, so a broken build shows up right away. Downloads are only kept for manual runs and tags.)
 3. After about 15–25 minutes, download:
-   * `StemSplitter-Windows-x64.zip`: unzip it and run `StemSplitter\StemSplitter.exe`. It uses an NVIDIA GPU when the PC has one and falls back to the CPU otherwise. It is a ~2.5 GB download because it includes CUDA. On a GitHub Release it comes as `StemSplitter-Windows-x64.7z.001`, `.002`, …: download all parts and open the `.001` with [7-Zip](https://www.7-zip.org).
+   * `StemSplitter-Windows-x64.zip.001`, `.002`, …: a zip cut into parts, because GitHub doesn't accept files over 2 GB. Download all the parts into one folder, open the `.001` with [7-Zip](https://www.7-zip.org), extract it, and run `StemSplitter\StemSplitter.exe`. It uses an NVIDIA GPU when the PC has one and falls back to the CPU otherwise. It is a ~2.5 GB download because it includes CUDA (the size of the earlier single zip; not measured again with the parts).
    * `StemSplitter-macOS-AppleSilicon.zip`: unzip it and drag `StemSplitter.app` to Applications
-   * *(optional)* `StemSplitter-Windows-x64-CPU.zip`: tick "CPU-only" when you run the workflow. It is a much smaller download for PCs without an NVIDIA GPU, and is only available from the workflow run's Artifacts.
+   * *(optional)* `StemSplitter-Windows-x64-CPU.zip.001` (one part, open it with 7-Zip): tick "CPU-only" when you run the workflow. It is a much smaller download for PCs without an NVIDIA GPU, and is only available from the workflow run's Artifacts.
+
+Each download comes with a `.files.json` file: the list of files the app uses to update itself. You don't need it to install.
 
 ### First launch
 
@@ -100,6 +103,14 @@ On an NVIDIA GPU, *Maximum* keeps only the model that is running in video memory
 
 You can close the window and it asks before stopping a job that is still running.
 
+## Updates
+
+When a new version is published on GitHub, StemSplitter tells you when it starts (untick *Check for updates when the app starts* on the Settings page to turn this off, and use *Check for updates* there whenever you like). The pop-up shows what's new and offers *Update now*, *Later* or *Skip this version*.
+
+*Update now* downloads only the files that changed. StemSplitter then closes, a small window installs the update and checks the new version, and the app opens again. If anything fails, your current version is kept and the app tells you why. For this to work, the app's folder and the folder containing it must be writable: keep the app in a folder of your own (Downloads, Desktop, Documents…), not in `C:\Program Files`. While it updates, it uses a `.ss-update` folder next to the app and removes it afterwards.
+
+Copies running from source, local builds and the CPU-only Windows build can't update themselves; for those the pop-up opens the download page.
+
 ## Running from source (developers)
 
 Python 3.11 is recommended.
@@ -128,16 +139,19 @@ Lint (the same check as CI): `pip install ruff==0.16.9 && ruff check .`
 main.py                         entry point (GUI, --cli, --selftest)
 stemsplitter/engine.py          separation pipeline (decode → RoFormer models → stems → MP3/WAV), all in memory
 stemsplitter/gui.py             PySide6 window logic; starts and stops the worker process
-stemsplitter/ui/                the window's look: theme tokens, icons, components and pages
+stemsplitter/ui/                the window's look: theme tokens, icons, components, pages and the update dialog
 stemsplitter/worker.py          worker process: runs the queue on the engine, reports progress to the GUI
 stemsplitter/memgov.py          memory governor: keeps the app below what the system needs free
 stemsplitter/memory.py          memory logging (STEMSPLITTER_MEMLOG=1)
 stemsplitter/platform_utils.py  app folders, bundled ffmpeg, Windows/macOS quirks
+stemsplitter/updater.py         self-update: release check, changed files, range downloads, install, rollback
+stemsplitter/release.py         release tools for CI (file index, archive check, tag/version check)
 StemSplitter.spec               PyInstaller build recipe
 .github/workflows/build.yml     CI: lint, Windows + macOS builds, self-test, releases
 ruff.toml                       lint rules (real errors only)
 CLAUDE.md                       project rules for Claude Code (English only; document every relevant change)
 docs/DOCUMENTATION.md           full technical documentation
+tests/                          regression tests (engine with a fake network; updater)
 tools/make_icon.py              generates the icons in assets/
 ```
 
@@ -149,6 +163,8 @@ tools/make_icon.py              generates the icons in assets/
 * There is a **memory floor** (PyTorch, one model and one chunk: ~1.2–1.5 GB of RAM measured on Windows with CUDA). Below that the app waits for memory instead of running. A song being split also needs up to ~0.3 GB of disk per minute until its files are written.
 * The *Windows-x64-CPU* CI job only builds on a manual run with the CPU-only option; otherwise it skips its steps and still shows as passed.
 * The apps are unsigned. For public distribution you would need an Apple Developer ID ($99/yr, plus notarization) and a Windows code-signing certificate.
+* Updates are checked against a list of file hashes from the GitHub release and downloaded over HTTPS, but that list isn't signed: whoever can publish releases in the repository can ship an update.
+* Self-update on macOS has only been checked by CI so far, not yet on a Mac.
 
 ## Licenses
 

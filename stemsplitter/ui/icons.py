@@ -55,6 +55,8 @@ _SHAPES = {
               'M6 17v3M18 17v3"/>',
     "chevron-down": '<path d="m6 9 6 6 6-6"/>',
     "arrow-left": '<path d="M19 12H5M12 19l-7-7 7-7"/>',
+    "download": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
+    "refresh": '<path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/>',
 }
 
 

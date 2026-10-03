@@ -265,5 +265,8 @@ QScrollBar::add-page, QScrollBar::sub-page {{ background: none; }}
 
 QToolTip {{ background: {c.CARD_2}; color: {c.TEXT}; border: 1px solid {c.BORDER}; padding: 6px 8px; }}
 QMessageBox, QDialog {{ background: {c.CARD}; }}
+QTextBrowser#releaseNotes {{
+    background: {c.FIELD}; color: {c.TEXT_2}; border: 1px solid {c.BORDER_SOFT}; border-radius: 10px; padding: 8px;
+}}
 QMessageBox QPushButton {{ min-width: 88px; min-height: 36px; }}
 """
