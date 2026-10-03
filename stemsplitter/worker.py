@@ -75,10 +75,14 @@ def run_jobs(engine, jobs: list[tuple[int, Path]], opts, cancel, emit: Emit) -> 
     # it (the stems are in files, but the encoders still need some). At most one song waits.
     with ThreadPoolExecutor(max_workers=1) as writer:
         pending = None  # future of the song being written
+        pending_path = None
         try:
             for row, path in jobs:
-                if pending is not None and engine.gov.level() != "relaxed":
-                    cancelled = wait(pending) or cancelled  # one song at a time while memory is short
+                # one song at a time while memory is short, and for the same file twice in a row (both
+                # would use one work folder, which the writer removes when it is done)
+                if pending is not None and (engine.gov.level() != "relaxed"
+                                            or Path(path).resolve() == Path(pending_path).resolve()):
+                    cancelled = wait(pending) or cancelled
                     pending = None
                 if cancel.is_set():
                     cancelled = True
@@ -95,7 +99,7 @@ def run_jobs(engine, jobs: list[tuple[int, Path]], opts, cancel, emit: Emit) -> 
                     emit("failed", row, str(exc) or exc.__class__.__name__)
                     continue
                 cancelled = wait(pending) or cancelled
-                pending = writer.submit(write, row, separated, progress)
+                pending, pending_path = writer.submit(write, row, separated, progress), path
                 del separated  # the writer holds the only reference: freed as soon as it is written
         finally:
             cancelled = wait(pending) or cancelled

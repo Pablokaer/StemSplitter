@@ -89,7 +89,7 @@ OUTPUTS = {
 MODEL_STEMS = ["Vocals", "Drums", "Bass", "Guitar", "Piano"]  # the stem model's outputs that are used
 DEFAULT_STEMS = ("Vocals", "Drums", "Bass", "Other")
 BLOCK_FRAMES = SAMPLE_RATE * 10  # 10 s: the unit for decoding, assembling and encoding (~3.5 MB per stem)
-WORK_VERSION = 1  # bump when the work-folder layout changes (old checkpoints are then ignored)
+WORK_VERSION = 2  # bump when the work-folder layout changes (old checkpoints are then ignored)
 CHECKPOINT_SECONDS = 15
 STALE_WORK_SECONDS = 7 * 24 * 3600
 CHUNK_NEED_DEFAULT = 768 * MB  # memory asked for one inference chunk until the real cost is measured
@@ -401,6 +401,20 @@ class _Work:
             tmp = self.dir / "state.json.tmp"
             tmp.write_text(json.dumps(self.state), encoding="utf-8")
             os.replace(tmp, self.dir / "state.json")
+
+    def forget(self, *keys: str) -> None:
+        """Remove steps from the checkpoint, so they run again."""
+        with self._lock:
+            for key in keys:
+                self.state.pop(key, None)
+        self.save()
+
+    def complete(self, name: str, frames: int) -> bool:
+        """True if the track holds all `frames` (nothing is fsync'ed: a power cut can leave it short)."""
+        try:
+            return self.path(name).stat().st_size >= frames * 8
+        except OSError:
+            return False
 
     def drop(self, *names: str) -> None:
         for name in names:
@@ -892,6 +906,19 @@ class StemEngine:
             def stage(name: str):
                 a, b = stages[name]
                 return lambda frac, text: progress(a + (b - a) * max(0.0, min(1.0, frac)), text)
+
+            # A step recorded as done whose files came out short (a power cut before the OS wrote them)
+            # runs again, instead of failing on every retry.
+            if st.get("frames") and not work.complete("mix", st["frames"]):
+                work.forget(*list(st))
+            elif st.get("assembled") and not all(work.complete(f"out_{k}", st["frames"]) for k in outputs):
+                work.forget("stems", "vocals", "assembled", "peaks", "encoded")  # their inputs were dropped
+            elif not st.get("assembled"):  # (after the assembly the model outputs are gone on purpose)
+                if (st.get("stems") or {}).get("done") and not all(work.complete(f"sw_{k}", st["frames"])
+                                                                   for k in names):
+                    work.forget("stems")
+                if (st.get("vocals") or {}).get("done") and not work.complete("mel_Vocals", st["frames"]):
+                    work.forget("vocals")
 
             # 1) decode ----------------------------------------------------------------------
             if st.get("frames"):

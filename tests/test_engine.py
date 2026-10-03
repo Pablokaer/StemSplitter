@@ -192,6 +192,36 @@ class EngineGolden(unittest.TestCase):
         for _, row, files, _secs in done:
             self.assertGolden("balanced-all8-loud", files)
 
+    @unittest.skipIf(CAPTURE, "uses the golden output")
+    def test_same_song_twice_in_a_batch(self):
+        """Both rows of the same file (one work folder) finish with the single-run files."""
+        eng = self.engine(delay=0.01)
+        song = self.clips["loud40"]
+        events = []
+        run_jobs(eng, [(0, song), (1, song)], self.opts("balanced-all8-loud", self.tmp / "twice"), threading.Event(),
+                 lambda *e: events.append(e))
+        done = [e for e in events if e[0] == "done"]
+        self.assertEqual(sorted(e[1] for e in done), [0, 1], [e for e in events if e[0] != "status"])
+        for _, row, files, _secs in done:
+            self.assertGolden("balanced-all8-loud", files)
+
+    @unittest.skipIf(CAPTURE, "uses the golden output")
+    def test_short_work_files_are_redone(self):
+        """A step recorded as done whose file came out short (power cut) runs again instead of failing."""
+        case, clip = "maximum-all8-loud", self.clips["loud40"]
+        for name, assemble in [("sw_Vocals", False), ("mel_Vocals", False), ("out_Other", True), ("mix", False)]:
+            with self.subTest(name):
+                eng = self.engine()
+                opts = self.opts(case, self.tmp / f"short_{name}")
+                sep = eng.split(clip, opts, lambda f, s: None, assemble=assemble)
+                for t in sep.stems.values():
+                    t.close()
+                path = sep.work.path(name)
+                with open(path, "r+b") as f:
+                    f.truncate(path.stat().st_size // 2)
+                res = eng.separate(clip, opts, lambda f, s: None)
+                self.assertGolden(case, res.stems)
+
     def test_outputs_resolution(self):
         o = E.Options(output_dir=".", stems=("No Drums", "Vocals"))
         self.assertEqual(o.outputs(), ["Vocals", "No Drums"])
