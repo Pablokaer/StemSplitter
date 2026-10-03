@@ -53,15 +53,17 @@ The apps are built for you by GitHub Actions (free), because a Windows build has
    *Or* publish a release: set the version in `stemsplitter/__init__.py`, then `git tag v1.0.0 && git push --tags` (the tag must match that version). The release is published when both builds pass, and installed apps are offered the update.
    (Every push is also linted, built and self-tested, so a broken build shows up right away. Downloads are only kept for manual runs and tags.)
 3. After about 15–25 minutes, download:
-   * **Windows:** `StemSplitter-Windows-x64.zip`, a single file. Right-click it → **Extract All** (or use 7-Zip), then run `StemSplitter\StemSplitter.exe`. It uses an NVIDIA GPU when the PC has one and falls back to the CPU otherwise. It is a ~2.1 GB download because it includes CUDA. Extract it somewhere with a short path, such as your Downloads folder: Windows' built-in extractor silently skips files whose full path is longer than 260 characters, and the app's deepest file sits ~150 characters inside the zip.
+   * **Windows:** `StemSplitter-Windows-x64-Setup.exe`, the installer (~1.8 GB, because it includes CUDA). Run it: it installs StemSplitter for your user in `%LOCALAPPDATA%\Programs\StemSplitter` (no administrator rights needed), adds it to the Start menu (and, if you tick it, the desktop) and to *Settings → Apps*, where you can uninstall it. It uses an NVIDIA GPU when the PC has one and falls back to the CPU otherwise. Running a newer installer over an installed copy upgrades it.
+   * **Windows, portable:** `StemSplitter-Windows-x64.zip` (~2.1 GB) is the same app without installing: right-click it → **Extract All** (or use 7-Zip) and run `StemSplitter\StemSplitter.exe`. Extract it somewhere with a short path, such as your Downloads folder: Windows' built-in extractor silently skips files whose full path is longer than 260 characters, and the app's deepest file sits ~150 characters inside the zip.
    * **Mac:** `StemSplitter-macOS-AppleSilicon.zip`: unzip it and drag `StemSplitter.app` to Applications
-   * *(optional)* `StemSplitter-Windows-x64-CPU.zip`: tick "CPU-only" when you run the workflow. It is a much smaller download for PCs without an NVIDIA GPU, and is only available from the workflow run's Artifacts.
+   * *(optional)* `StemSplitter-Windows-x64-CPU-Setup.exe` (or the portable `StemSplitter-Windows-x64-CPU.zip`): tick "CPU-only" when you run the workflow. It is a much smaller download for PCs without an NVIDIA GPU, and is only available from the workflow run's Artifacts.
 
-   You can ignore the other files on the release page: `.files.json` is the list of files the app uses to update itself, and *Source code* is the code. (If a future Windows build ever grows past GitHub's 2 GiB limit for one file, it is published as `.zip.001`, `.002`, … parts instead: download them all into one folder and open the `.001` with [7-Zip](https://www.7-zip.org).)
+   You can ignore the other files on the release page: `.files.json` is the list of files the app uses to update itself, and *Source code* is the code. The release notes start with the same advice. (If a future Windows build ever grows past GitHub's 2 GiB limit for one file, it is published as `.zip.001`, `.002`, … parts instead: download them all into one folder and open the `.001` with [7-Zip](https://www.7-zip.org).)
 
 ### First launch
 
-* **Windows SmartScreen**: the app isn't code-signed, so click **More info → Run anyway**.
+* **Windows SmartScreen**: the installer and the app aren't code-signed, so click **More info → Run anyway**.
+* **Uninstalling** (installed copy): *Settings → Apps → StemSplitter → Uninstall*. It asks whether to also remove the downloaded models, your settings and the log; your split songs are never touched.
 * **macOS Gatekeeper**: right-click the app → **Open** → **Open**. If macOS says the app is "damaged", run this once:
   `xattr -dr com.apple.quarantine /Applications/StemSplitter.app`
 * **Models**: the first split downloads the models once (~0.7 GB, plus ~0.9 GB the first time you use Maximum). They are stored in
@@ -108,7 +110,7 @@ You can close the window and it asks before stopping a job that is still running
 
 When a new version is published on GitHub, StemSplitter tells you when it starts (untick *Check for updates when the app starts* on the Settings page to turn this off, and use *Check for updates* there whenever you like). The pop-up shows what's new and offers *Update now*, *Later* or *Skip this version*.
 
-*Update now* downloads only the files that changed. StemSplitter then closes, a small window installs the update and checks the new version, and the app opens again. If anything fails, your current version is kept and the app tells you why. For this to work, the app's folder and the folder containing it must be writable: keep the app in a folder of your own (Downloads, Desktop, Documents…), not in `C:\Program Files`. While it updates, it uses a `.ss-update` folder next to the app and removes it afterwards.
+*Update now* downloads only the files that changed. StemSplitter then closes, a small window installs the update and checks the new version, and the app opens again. If anything fails, your current version is kept and the app tells you why. For this to work, the app's folder and the folder containing it must be writable. The installer already puts it in such a folder; with the portable zip, keep the app in a folder of your own (Downloads, Desktop, Documents…), not in `C:\Program Files`. While it updates, it uses a `.ss-update` folder next to the app and removes it afterwards.
 
 Copies running from source, local builds and the CPU-only Windows build can't update themselves; for those the pop-up opens the download page.
 
@@ -150,6 +152,7 @@ stemsplitter/release.py         release tools for CI (file index, archive check,
 stemsplitter/i18n.py            interface languages (tr(), language list, system language)
 stemsplitter/locales/           one translation catalog per language
 StemSplitter.spec               PyInstaller build recipe
+installer/StemSplitter.iss      Windows installer (Inno Setup)
 .github/workflows/build.yml     CI: lint, Windows + macOS builds, self-test, releases
 ruff.toml                       lint rules (real errors only)
 CLAUDE.md                       project rules for Claude Code (English only; document every relevant change)
