@@ -85,9 +85,17 @@ PREFERRED_FONTS = ["Inter", "Inter Variable", "Segoe UI Variable Text", "Segoe U
                    ".AppleSystemUIFont", "Helvetica Neue", "Arial"]
 
 
-def pick_font_family() -> str:
+# Scripts the Latin fonts above don't cover. Left to Qt's per-glyph fallback, Devanagari lost its vowel signs
+# in bold text and its lines overlapped (Windows 11), so these languages use a font made for their script.
+SCRIPT_FONTS = {
+    "hi": ["Nirmala UI", "Kohinoor Devanagari", "Devanagari Sangam MN", "Noto Sans Devanagari", "Mangal"],
+    "zh": ["Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC"],
+}
+
+
+def pick_font_family(language: str = "en") -> str:
     families = set(QFontDatabase.families())
-    for name in PREFERRED_FONTS:
+    for name in SCRIPT_FONTS.get(language, []) + PREFERRED_FONTS:
         if name in families:
             Type.family = name
             break

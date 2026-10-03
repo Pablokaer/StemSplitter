@@ -24,6 +24,7 @@ You tick which of these to write, from a single one (for example only **No Drums
 * **Output**: MP3 at 320, 256 or 192 kbps, or 24-bit WAV, in one subfolder per song. The stems add back up to the original song exactly.
 * **Easy to use**: a dark, modern window with a drop area, a queue that shows each song's state and time left, a processing card with the progress and a *Cancel* button, and a status bar with the device in use. There is a log with the time of every step, and your settings are remembered. The models download themselves on first use, with progress shown.
 * **Updates itself**: when a new version is published it shows what changed and asks. *Update now* downloads only the files that changed, installs them, checks the new version and restarts; if the check fails, your current version is kept. You can also check by hand on the Settings page.
+* **In your language**: English, Português (Brasil), Español, 中文（简体） or हिन्दी. It follows your system's language and can be changed on the Settings page (the app restarts to switch). The log and the command line stay in English.
 * **Command line** for scripting and batches (`--cli`), and a self-test (`--selftest`) used by CI.
 
 ## How it gets such clean stems
@@ -72,7 +73,7 @@ Each download comes with a `.files.json` file: the list of files the app uses to
 2. In **Output Settings**, choose where to save, the quality, the format, and under **Stems to extract** tick the stems you want: Vocals, Drums, Bass, Other (melody), Guitar, Piano (keys), Instrumental (no vocals) and No Drums (the song without drums). Each song gets its own subfolder with one file per ticked stem: `Song - Vocals.mp3`, `Song - Drums.mp3`, `Song - Bass.mp3`, `Song - Other.mp3`, …
 3. Click **Split Stems**. The processing card at the bottom shows the song being split, its progress and the time left, with a **Cancel** button. If some songs fail, click **Split Stems** again to retry only those.
 
-*Show log* and *Open output folder* are next to the Split Stems button. The memory reserve (*Keep free for the system*) and *Ignore the memory limit* are on the **Settings** page; **About** has the version and the models.
+*Show log* and *Open output folder* are next to the Split Stems button. The language, the memory reserve (*Keep free for the system*) and *Ignore the memory limit* are on the **Settings** page; **About** has the version and the models.
 
 **Quality**
 * *Balanced*: the default. Better than the previous version's best setting on every stem, and faster.
@@ -146,12 +147,14 @@ stemsplitter/memory.py          memory logging (STEMSPLITTER_MEMLOG=1)
 stemsplitter/platform_utils.py  app folders, bundled ffmpeg, Windows/macOS quirks
 stemsplitter/updater.py         self-update: release check, changed files, range downloads, install, rollback
 stemsplitter/release.py         release tools for CI (file index, archive check, tag/version check)
+stemsplitter/i18n.py            interface languages (tr(), language list, system language)
+stemsplitter/locales/           one translation catalog per language
 StemSplitter.spec               PyInstaller build recipe
 .github/workflows/build.yml     CI: lint, Windows + macOS builds, self-test, releases
 ruff.toml                       lint rules (real errors only)
 CLAUDE.md                       project rules for Claude Code (English only; document every relevant change)
 docs/DOCUMENTATION.md           full technical documentation
-tests/                          regression tests (engine with a fake network; updater)
+tests/                          regression tests (engine with a fake network; updater; translations)
 tools/make_icon.py              generates the icons in assets/
 ```
 
@@ -165,6 +168,7 @@ tools/make_icon.py              generates the icons in assets/
 * The apps are unsigned. For public distribution you would need an Apple Developer ID ($99/yr, plus notarization) and a Windows code-signing certificate.
 * Updates are checked against a list of file hashes from the GitHub release and downloaded over HTTPS, but that list isn't signed: whoever can publish releases in the repository can ship an update.
 * Self-update on macOS has only been checked by CI so far, not yet on a Mac.
+* The log, the command line and the separation engine's error messages are in English whatever the language, and switching the language restarts the app.
 
 ## Licenses
 

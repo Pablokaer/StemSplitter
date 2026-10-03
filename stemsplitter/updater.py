@@ -14,7 +14,8 @@
    the app again. The app shows the result once and removes the work folder.
 
 Only the standard library is imported at module level: CI runs the release tools (`stemsplitter.release`)
-without the app's dependencies.
+without the app's dependencies. The messages a user can see go through `tr()` (stemsplitter/i18n.py); the
+ones only CI or a developer sees stay in English.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Iterator
 
 from . import APP_NAME, __version__
+from .i18n import tr
 
 REPO = "Pablokaer/StemSplitter"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
@@ -177,10 +179,11 @@ def fetch_latest() -> Release | None:
         if exc.code == 404:
             return None
         if exc.code == 403:
-            raise UpdateError("GitHub refused the request (too many checks from this network); try again later") from exc
-        raise UpdateError(f"GitHub answered {exc.code} {exc.reason}") from exc
+            raise UpdateError(tr("GitHub refused the request (too many checks from this network); try again "
+                                 "later")) from exc
+        raise UpdateError(tr("GitHub answered {code} {reason}", code=exc.code, reason=exc.reason)) from exc
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise UpdateError(f"Can't reach GitHub ({_reason(exc)})") from exc
+        raise UpdateError(tr("Can't reach GitHub ({reason})", reason=_reason(exc))) from exc
     tag = str(data.get("tag_name") or "")
     assets = {a["name"]: (a["browser_download_url"], int(a["size"])) for a in data.get("assets", [])}
     return Release(version=tag.lstrip("vV"), tag=tag, notes=str(data.get("body") or ""),
@@ -263,14 +266,15 @@ def _writable(folder: Path) -> bool:
 def self_update_problem(inst: Installation | None, release: Release) -> str | None:
     """Why this copy can't install `release` by itself (the user then gets the download page), or None."""
     if inst is None:
-        return "StemSplitter is running from source code here: update it with git pull."
+        return tr("StemSplitter is running from source code here: update it with git pull.")
     if not inst.platform:
-        return "This build was not made by the release workflow, so it can't update itself."
+        return tr("This build was not made by the release workflow, so it can't update itself.")
     if index_name(inst.platform) not in release.assets or not archive_parts(release.assets,
                                                                             archive_name(inst.platform)):
-        return f"Version {release.version} has no update files for this build ({inst.platform})."
+        return tr("Version {version} has no update files for this build ({platform}).",
+                  version=release.version, platform=inst.platform)
     if not _writable(inst.root) or not _writable(inst.root.parent):
-        return f"StemSplitter can't write to the folder it is installed in ({inst.root.parent})."
+        return tr("StemSplitter can't write to the folder it is installed in ({folder}).", folder=inst.root.parent)
     return None
 
 
@@ -328,7 +332,7 @@ def _safe_rel(rel: str) -> str:
 def check_index(index: dict, platform: str | None = None, version: str | None = None) -> dict:
     """Reject an index this updater can't use, or one with paths that would leave the app's folder."""
     if index.get("format") != INDEX_FORMAT:
-        raise UpdateError("This update needs a newer updater: download it from the release page.")
+        raise UpdateError(tr("This update needs a newer updater: download it from the release page."))
     if platform is not None and index.get("platform") != platform:
         raise UpdateError(f"The update index is for {index.get('platform')}, not {platform}.")
     if version is not None and index.get("version") != version:
@@ -354,7 +358,7 @@ def fetch_index(release: Release, platform: str) -> dict:
         with _urlopen(url) as r:
             data = json.loads(r.read(64 << 20))
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise UpdateError(f"Can't download the update index ({_reason(exc)})") from exc
+        raise UpdateError(tr("Can't download the update index ({reason})", reason=_reason(exc))) from exc
     return check_index(data, platform, release.version)
 
 
@@ -402,7 +406,7 @@ def make_plan(root: Path, index: dict, staging: Path, progress: Progress | None 
     files = index["files"]
     local = _local_entries(root)
     same_size = [rel for rel, m in files.items() if "link" not in m and local.get(rel) == ("file", m["size"])]
-    tick = _Throttle(progress, "Checking the installed files…", sum(files[rel]["size"] for rel in same_size))
+    tick = _Throttle(progress, tr("Checking the installed files…"), sum(files[rel]["size"] for rel in same_size))
     same = {rel for rel in same_size if _sha256(root / rel, tick, cancel) == files[rel]["sha256"]}
     same |= {rel for rel, m in files.items() if "link" in m and local.get(rel) == ("link", m["link"])}
     need = [rel for rel in files if rel not in same]
@@ -470,7 +474,7 @@ class RemoteParts(Parts):
             try:
                 with _urlopen(loc, {"Range": f"bytes={a}-{b - 1}"}) as r:
                     if r.status != 206 and not (r.status == 200 and a == 0 and b == size):
-                        raise UpdateError("The download server doesn't support partial downloads.")
+                        raise UpdateError(tr("The download server doesn't support partial downloads."))
                     while a < b:
                         chunk = r.read(min(CHUNK, b - a))
                         if not chunk:
@@ -481,7 +485,7 @@ class RemoteParts(Parts):
             except (urllib.error.URLError, OSError) as exc:  # retried from where it stopped
                 tries += 1
                 if tries >= RETRIES:
-                    raise UpdateError(f"The download failed ({_reason(exc)})") from exc
+                    raise UpdateError(tr("The download failed ({reason})", reason=_reason(exc))) from exc
                 for _ in range(tries * 20):
                     if self.cancel is not None and self.cancel.is_set():
                         raise Cancelled() from exc
@@ -538,7 +542,7 @@ class _Reader:
             raise Cancelled()
         chunk = next(self._it, None)
         if chunk is None:
-            raise UpdateError("The update archive ended early")
+            raise UpdateError(tr("The update archive is damaged ({reason})", reason="ended early"))
         self._on_bytes(len(chunk))
         self._buf += chunk
 
@@ -572,7 +576,7 @@ def _members(parts: Parts) -> tuple[dict[str, zipfile.ZipInfo], list[int]]:
             infos = zf.infolist()
             cd_start = zf.start_dir
     except zipfile.BadZipFile as exc:
-        raise UpdateError(f"The update archive is damaged ({exc})") from exc
+        raise UpdateError(tr("The update archive is damaged ({reason})", reason=exc)) from exc
     offsets = sorted({i.header_offset for i in infos} | {cd_start})
     return {i.filename.replace("\\", "/"): i for i in infos if not i.is_dir()}, offsets
 
@@ -580,7 +584,7 @@ def _members(parts: Parts) -> tuple[dict[str, zipfile.ZipInfo], list[int]]:
 def _extract(reader: _Reader, info: zipfile.ZipInfo, meta: dict, dest: Path, rel: str) -> None:
     head = reader.read(30)
     if head[:4] != b"PK\x03\x04":
-        raise UpdateError("The update archive is damaged (bad file header)")
+        raise UpdateError(tr("The update archive is damaged ({reason})", reason="bad file header"))
     name_len, extra_len = struct.unpack("<HH", head[26:30])
     reader.read(name_len + extra_len)
     if dest.is_dir() and not dest.is_symlink():
@@ -607,7 +611,7 @@ def _extract(reader: _Reader, info: zipfile.ZipInfo, meta: dict, dest: Path, rel
             put(inflate.flush())
     if size != meta["size"] or h.hexdigest() != meta["sha256"]:
         tmp.unlink()
-        raise UpdateError(f"{rel} doesn't match the update index (damaged download)")
+        raise UpdateError(tr("{file} doesn't match the update index (damaged download)", file=rel))
     if meta.get("exec") and os.name != "nt":
         os.chmod(tmp, 0o755)
     os.replace(tmp, dest)
@@ -633,7 +637,7 @@ def download(parts: Parts, index: dict, plan: Plan, staging: Path, progress: Pro
     for rel in plan.fetch:
         info = members.get(prefix + rel)
         if info is None:
-            raise UpdateError(f"{rel} is missing from the update archive")
+            raise UpdateError(tr("{file} is missing from the update archive", file=rel))
         if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED) or info.flag_bits & 0x1:
             raise UpdateError(f"{rel} is stored in a way the updater can't read")
         end = offsets[bisect.bisect_right(offsets, info.header_offset)]
@@ -646,7 +650,7 @@ def download(parts: Parts, index: dict, plan: Plan, staging: Path, progress: Pro
         else:
             groups.append([job])
     total = sum(g[-1][1] - g[0][0] for g in groups)
-    tick = _Throttle(progress, f"Downloading {_mb(total)}…", total)
+    tick = _Throttle(progress, tr("Downloading {size}…", size=_mb(total)), total)
     for group in groups:
         reader = _Reader(parts.stream(group[0][0], group[-1][1]), group[0][0], tick, cancel)
         try:
@@ -767,7 +771,7 @@ def prepare(inst: Installation, release: Release, progress: Progress | None = No
     work = inst.work
     staging = work / NEW
     if progress:
-        progress(0.0, "Reading the update index…")
+        progress(0.0, tr("Reading the update index…"))
     index = fetch_index(release, inst.platform)
     plan = make_plan(inst.root, index, staging, progress, cancel)
     if plan.empty:
@@ -775,8 +779,8 @@ def prepare(inst: Installation, release: Release, progress: Progress | None = No
     work.mkdir(exist_ok=True)
     free = shutil.disk_usage(work).free
     if free < plan.fetch_bytes + SPACE_MARGIN:
-        raise UpdateError(f"Not enough free disk space: the update needs {_mb(plan.fetch_bytes + SPACE_MARGIN)} "
-                          f"next to the app and there is {_mb(free)}.")
+        raise UpdateError(tr("Not enough free disk space: the update needs {need} next to the app and there is "
+                             "{free}.", need=_mb(plan.fetch_bytes + SPACE_MARGIN), free=_mb(free)))
     download(remote_parts(release, inst.platform, cancel), index, plan, staging, progress, cancel)
     return plan
 
@@ -790,7 +794,7 @@ def start_install(inst: Installation, plan: Plan, progress: Progress | None = No
         elif leftover.exists():
             leftover.unlink()
     if progress:
-        progress(1.0, "Preparing the installer…")
+        progress(1.0, tr("Preparing the installer…"))
     # on macOS the copy keeps the bundle's name (StemSplitter.app); paths there have no 260-character limit
     helper = work / HELPER / inst.root.name if sys.platform == "darwin" else work / HELPER
     clone_tree(inst.root, helper)
@@ -819,9 +823,9 @@ def run_selftest(exe: Path, timeout: float = SELFTEST_TIMEOUT) -> tuple[bool, st
         code = subprocess.run([str(exe), "--selftest"], cwd=exe.parent, timeout=timeout, stdin=subprocess.DEVNULL,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **subprocess_flags()).returncode
     except subprocess.TimeoutExpired:
-        return False, f"The self-test didn't finish in {timeout // 60:.0f} minutes."
+        return False, tr("The self-test didn't finish in {minutes} minutes.", minutes=f"{timeout // 60:.0f}")
     except OSError as exc:
-        return False, f"The new version didn't start ({exc})."
+        return False, tr("The new version didn't start ({reason}).", reason=exc)
     try:
         text = report.read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
@@ -850,34 +854,35 @@ def install(work: Path, status: Callable[[str], None] = lambda text: None,
     plan = _read_json(work / PLAN)
     root, staging, backup = Path(plan["root"]), work / NEW, work / OLD
     result = {"ok": False, "version": plan["version"], "from": plan["from"]}
-    status("Waiting for StemSplitter to close…")
+    status(tr("Waiting for StemSplitter to close…"))
     deadline = time.monotonic() + 120
     while _pid_alive(plan.get("pid")) and time.monotonic() < deadline:
         time.sleep(0.2)
     if _pid_alive(plan.get("pid")):
-        result["message"] = "StemSplitter didn't close, so nothing was changed."
+        result["message"] = tr("StemSplitter didn't close, so nothing was changed.")
         _write_json(work / RESULT, result)
         return result
     _write_json(work / STATE, {"state": "applying", "helper": os.getpid()})
     try:
-        status(f"Installing version {plan['version']}…")
+        status(tr("Installing version {version}…", version=plan["version"]))
         apply(root, staging, backup, plan)
-        status("Checking the new version…")
+        status(tr("Checking the new version…"))
         ok, report = selftest(root / plan["exe"])
         if ok:
             result.update(ok=True, message="")
         else:
-            result["message"] = "The new version failed its self-test, so the previous version was kept.\n\n" + \
-                                report[-3000:]
+            result["message"] = tr("The new version failed its self-test, so the previous version was kept.") + \
+                                "\n\n" + report[-3000:]
     except OSError as exc:
-        result["message"] = f"The app's files could not be replaced ({exc}), so the previous version was kept."
+        result["message"] = tr("The app's files could not be replaced ({reason}), so the previous version was kept.",
+                               reason=exc)
     if not result["ok"]:
-        status("Restoring the previous version…")
+        status(tr("Restoring the previous version…"))
         try:
             rollback(root, staging, backup, plan)
         except OSError as exc:
-            result["message"] += (f"\n\nThe previous version could not be restored ({exc}). A complete copy of it "
-                                  f"is in {work / HELPER}.")
+            result["message"] += "\n\n" + tr("The previous version could not be restored ({reason}). A complete "
+                                              "copy of it is in {folder}.", reason=exc, folder=work / HELPER)
             _write_json(work / RESULT, result)
             _write_json(work / STATE, {"state": "broken"})
             return result
@@ -896,11 +901,11 @@ def recover(root: Path) -> dict | None:
     if not _same_root(plan, root):
         return None
     result = {"ok": False, "version": plan.get("version", "?"), "from": plan.get("from", __version__),
-              "message": "The update was interrupted, so the previous version was restored."}
+              "message": tr("The update was interrupted, so the previous version was restored.")}
     try:
         rollback(root, work / NEW, work / OLD, plan)
     except (OSError, KeyError) as exc:
-        result["message"] = f"The update was interrupted and could not be undone ({exc})."
+        result["message"] = tr("The update was interrupted and could not be undone ({reason}).", reason=exc)
         _write_json(work / STATE, {"state": "broken"})
     else:
         _write_json(work / STATE, {"state": "done"})

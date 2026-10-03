@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QProcess, QSettings, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QFont, QGuiApplication, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -25,7 +25,8 @@ from PySide6.QtWidgets import (
 )
 
 from . import APP_NAME, __version__
-from . import updater
+from . import i18n, updater
+from .i18n import N_, tr, tr_n
 from .memory import memlog
 from .platform_utils import default_output_dir, open_folder
 from .ui.pages import AboutPage, BatchPage, SettingsPage
@@ -48,10 +49,10 @@ FORMATS = [
     ("MP3 · 320 kbps", "mp3", 320),
     ("MP3 · 256 kbps", "mp3", 256),
     ("MP3 · 192 kbps", "mp3", 192),
-    ("WAV · 24-bit (lossless)", "wav", 0),
+    (N_("WAV · 24-bit (lossless)"), "wav", 0),
 ]
 RESERVES = [  # memory the system keeps free (see memgov.py); 0 = automatic
-    ("Automatic (recommended)", 0),
+    (N_("Automatic (recommended)"), 0),
     ("1 GB", 1024),
     ("2 GB", 2048),
     ("3 GB", 3072),
@@ -60,27 +61,27 @@ RESERVES = [  # memory the system keeps free (see memgov.py); 0 = automatic
     ("8 GB", 8192),
 ]
 QUALITIES = [
-    ("Balanced (recommended)", "balanced"),
-    ("Maximum (cleanest vocals, about 1.8× slower)", "maximum"),
-    ("Fast (about 1.8× faster, a little more bleed)", "fast"),
+    (N_("Balanced (recommended)"), "balanced"),
+    (N_("Maximum (cleanest vocals, about 1.8× slower)"), "maximum"),
+    (N_("Fast (about 1.8× faster, a little more bleed)"), "fast"),
 ]
-# (engine output name, checkbox text, tooltip), in the engine's OUTPUTS order
+# (engine output name, checkbox text, tooltip), in the engine's OUTPUTS order; the texts are translated when shown
 STEMS = [
-    ("Vocals", "Vocals", "Lead and backing vocals"),
-    ("Drums", "Drums", "Drum kit and percussion"),
-    ("Bass", "Bass", "Bass guitar, synth bass, 808"),
-    ("Other", "Other (melody)", "Everything else: guitars, keys, synths, strings… "
-                                "(without Guitar and Piano when those are ticked too)"),
-    ("Guitar", "Guitar", "Split out of Other"),
-    ("Piano", "Piano (keys)", "Split out of Other"),
-    ("Instrumental", "Instrumental (no vocals)", "The whole song without the vocals"),
-    ("No Drums", "No Drums (song without drums)", "The whole song with only the drums taken out"),
+    ("Vocals", N_("Vocals"), N_("Lead and backing vocals")),
+    ("Drums", N_("Drums"), N_("Drum kit and percussion")),
+    ("Bass", N_("Bass"), N_("Bass guitar, synth bass, 808")),
+    ("Other", N_("Other (melody)"), N_("Everything else: guitars, keys, synths, strings… "
+                                       "(without Guitar and Piano when those are ticked too)")),
+    ("Guitar", N_("Guitar"), N_("Split out of Other")),
+    ("Piano", N_("Piano (keys)"), N_("Split out of Other")),
+    ("Instrumental", N_("Instrumental (no vocals)"), N_("The whole song without the vocals")),
+    ("No Drums", N_("No Drums (song without drums)"), N_("The whole song with only the drums taken out")),
 ]
 DEFAULT_STEMS = ["Vocals", "Drums", "Bass", "Other"]
 QUALITY_HINTS = {
-    "balanced": "The best balance between separation quality and speed.",
-    "maximum": "Adds a second vocal model for the cleanest vocals. Takes longer.",
-    "fast": "The quickest preset, with a little more bleed between the stems.",
+    "balanced": N_("The best balance between separation quality and speed."),
+    "maximum": N_("Adds a second vocal model for the cleanest vocals. Takes longer."),
+    "fast": N_("The quickest preset, with a little more bleed between the stems."),
 }
 
 
@@ -222,7 +223,8 @@ class EngineProcess(QObject):
                 return
             for row in list(self._pending):
                 self._report(row)
-                self.file_failed.emit(row, f"The separation process stopped unexpectedly (exit code {code})")
+                self.file_failed.emit(row, tr("The separation process stopped unexpectedly (exit code {code})",
+                                              code=code))
             self._cleanup()
             self._finish(False)
 
@@ -343,11 +345,12 @@ class MainWindow(QMainWindow):
         self.batch_page.btn_folder.clicked.connect(self._pick_folder)
         self.batch_page.btn_split.clicked.connect(lambda: self.sidebar.select(self.PAGE_SPLIT))
         self.pages.addWidget(self.batch_page)
-        self.settings_page = SettingsPage(RESERVES, __version__)
+        self.settings_page = SettingsPage(RESERVES, __version__, i18n.LANGUAGES)
         self.reserve = self.settings_page.reserve
         self.chk_unlimited = self.settings_page.chk_unlimited
         self.chk_updates = self.settings_page.chk_updates
         self.settings_page.btn_check_updates.clicked.connect(lambda: self._check_updates(manual=True))
+        self.language = self.settings_page.language
         self.pages.addWidget(self.settings_page)
         self.pages.addWidget(AboutPage(APP_NAME, __version__))
         self.sidebar.page_changed.connect(self.pages.setCurrentIndex)
@@ -369,9 +372,9 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(content)
         lay.setContentsMargins(Spacing.XXL, Spacing.XXL - 4, Spacing.XXL, Spacing.XL)
         lay.setSpacing(Spacing.XL)
-        lay.addWidget(page_header("Split Audio into Stems",
-                                  "Separate any song into the stems you pick: vocals, drums, bass, melody, guitar, piano, "
-                                  "or the whole song without vocals or without drums."))
+        lay.addWidget(page_header(tr("Split Audio into Stems"),
+                                  tr("Separate any song into the stems you pick: vocals, drums, bass, melody, guitar, "
+                                     "piano, or the whole song without vocals or without drums.")))
 
         self.drop = DropZone()
         self.drop.files_dropped.connect(self.add_files)
@@ -468,6 +471,9 @@ class MainWindow(QMainWindow):
         self.reserve.setCurrentIndex(max(0, self.reserve.findData(int(self.settings.value("memory_reserve_mb", 0)))))
         self.chk_unlimited.setChecked(self.settings.value("ignore_memory_limit", "true") == "true")  # on by default
         self.chk_updates.setChecked(self.settings.value("check_updates", "true") == "true")
+        saved = str(self.settings.value("language", "") or "")  # "" = the system's language
+        self.language.setCurrentIndex(max(0, self.language.findData(saved)))
+        self.language.currentIndexChanged.connect(self._on_language_changed)
         self._on_options_changed()
 
     def _save_settings(self):
@@ -479,12 +485,13 @@ class MainWindow(QMainWindow):
         self.settings.setValue("memory_reserve_mb", self.reserve.currentData())
         self.settings.setValue("ignore_memory_limit", "true" if self.chk_unlimited.isChecked() else "false")
         self.settings.setValue("check_updates", "true" if self.chk_updates.isChecked() else "false")
+        self.settings.setValue("language", self.language.currentData())
 
     def _selected_stems(self) -> list[str]:
         return [name for name, chk in self.stem_checks.items() if chk.isChecked()]
 
     def _on_options_changed(self, *args):
-        self.output.quality_hint.setText(QUALITY_HINTS.get(self.quality.currentData(), ""))
+        self.output.quality_hint.setText(tr(QUALITY_HINTS.get(self.quality.currentData(), "")))
         self._update_ready_panel()
 
     # -- file list ----------------------------------------------------------------------
@@ -504,9 +511,10 @@ class MainWindow(QMainWindow):
         start = self.settings.value("last_input_dir", str(Path.home()))
         files, _ = QFileDialog.getOpenFileNames(
             self,
-            "Choose songs",
+            tr("Choose songs"),
             start,
-            "Audio (*.mp3 *.wav *.flac *.m4a *.aac *.ogg *.opus *.aiff *.aif *.wma);;All files (*)",
+            tr("Audio") + " (*.mp3 *.wav *.flac *.m4a *.aac *.ogg *.opus *.aiff *.aif *.wma);;" + tr("All files")
+            + " (*)",
         )
         if files:
             self.settings.setValue("last_input_dir", str(Path(files[0]).parent))
@@ -515,14 +523,14 @@ class MainWindow(QMainWindow):
     def _pick_folder(self):
         """Like dropping a folder: every supported file inside it (recursively) is added."""
         start = self.settings.value("last_input_dir", str(Path.home()))
-        folder = QFileDialog.getExistingDirectory(self, "Choose a folder of songs", start)
+        folder = QFileDialog.getExistingDirectory(self, tr("Choose a folder of songs"), start)
         if not folder:
             return
         self.settings.setValue("last_input_dir", folder)
         self.sidebar.select(self.PAGE_SPLIT)
         paths = scan_paths([folder])
         if not paths:
-            QMessageBox.information(self, APP_NAME, "No supported audio files were found in that folder.")
+            QMessageBox.information(self, APP_NAME, tr("No supported audio files were found in that folder."))
             return
         self.add_files(paths)
 
@@ -541,7 +549,7 @@ class MainWindow(QMainWindow):
             self.list.clear()
 
     def _pick_output(self):
-        d = QFileDialog.getExistingDirectory(self, "Save stems to", self.out_edit.text())
+        d = QFileDialog.getExistingDirectory(self, tr("Save stems to"), self.out_edit.text())
         if d:
             self.out_edit.setText(d)
 
@@ -567,11 +575,12 @@ class MainWindow(QMainWindow):
                       if self.list.item(i).data(self.ROLE_STATE) in ("queued", "failed"))
         if waiting:
             n = len(self._selected_stems())
-            detail = f"{waiting} song{'s' if waiting != 1 else ''} to split · {n} file{'s' if n != 1 else ''} " \
-                     f"per song · {self.quality.currentText()} · {self.fmt.currentText()}"
+            detail = " · ".join([tr_n("{n} song to split", "{n} songs to split", waiting),
+                                 tr_n("{n} file per song", "{n} files per song", n),
+                                 self.quality.currentText(), self.fmt.currentText()])
         else:
-            detail = "Add songs, choose the output settings and press Split Stems."
-        self.panel.set_message("Ready to split", detail)
+            detail = tr("Add songs, choose the output settings and press Split Stems.")
+        self.panel.set_message(tr("Ready to split"), detail)
 
     # -- run ----------------------------------------------------------------------------
     def _busy(self) -> bool:
@@ -586,16 +595,16 @@ class MainWindow(QMainWindow):
             if self.list.item(i).data(self.ROLE_STATE) in ("queued", "failed")
         ]
         if not jobs:
-            QMessageBox.information(self, APP_NAME, "Add one or more songs first (drag & drop or “Add Files”).")
+            QMessageBox.information(self, APP_NAME, tr("Add one or more songs first (drag & drop or “Add Files”)."))
             return
         if not self._selected_stems():
-            QMessageBox.information(self, APP_NAME, "Tick at least one stem to extract in Output Settings.")
+            QMessageBox.information(self, APP_NAME, tr("Tick at least one stem to extract in Output Settings."))
             return
         out = Path(self.out_edit.text()).expanduser()
         try:
             out.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            QMessageBox.warning(self, APP_NAME, f"Can't use that output folder:\n{exc}")
+            QMessageBox.warning(self, APP_NAME, tr("Can't use that output folder:") + f"\n{exc}")
             return
         self._save_settings()
 
@@ -617,7 +626,7 @@ class MainWindow(QMainWindow):
         self._timing.clear()
         self._current_row = None
         self._set_running(True)
-        self.panel.show_song(jobs[0][1].name, "Starting…", 0.0, "")
+        self.panel.show_song(jobs[0][1].name, tr("Starting…"), 0.0, "")
         self._append_log(f"Starting {len(jobs)} file(s) → {out}")
         self.engine.run(jobs, opts)
 
@@ -663,28 +672,31 @@ class MainWindow(QMainWindow):
         item = self.list.item(row)
         name = Path(item.data(self.ROLE_PATH)).name if item else ""
         left = self._time_left(row, frac, text)
-        self._set_item(row, "running", "running", f"{frac:.0%}" + (f" · {left} remaining" if left else ""), frac)
+        remaining = tr("{time} remaining", time=left) if left else ""
+        self._set_item(row, "running", "running", f"{frac:.0%}" + (f" · {remaining}" if left else ""), frac)
         # while song N is written, song N+1 is already separated: the panel follows the newest one
         if self._current_row is None or row >= self._current_row:
             self._current_row = row
-            eta = f"{left} remaining" if left else ("" if text.startswith(self.UNTIMED) else "Estimating time…")
-            self.panel.show_song(name, text, frac, eta)
+            # the English text decides (the worker always reports in English); the translation is shown
+            eta = remaining if left else ("" if text.startswith(self.UNTIMED) else tr("Estimating time…"))
+            self.panel.show_song(name, i18n.status_text(text), frac, eta)
             if not self.btn_cancel.isEnabled():
                 self.panel.set_cancelling()
 
     @Slot(str)
     def _on_device(self, device: str):
-        self.status_bar.set_device(device)
+        self.status_bar.set_device(i18n.device_text(device))
 
     @Slot(dict)
     def _on_memory(self, snap: dict):
         gb = 1024**3
+        used = f"{snap['used'] / gb:.1f}"
         if snap.get("unlimited"):
-            text = f"Memory: {snap['used'] / gb:.1f} GB · no limit"
+            text = tr("Memory: {used} GB · no limit", used=used)
         else:
-            text = f"Memory: {snap['used'] / gb:.1f} GB · limit {snap['budget'] / gb:.1f} GB"
+            text = tr("Memory: {used} GB · limit {limit} GB", used=used, limit=f"{snap['budget'] / gb:.1f}")
         if snap.get("waiting"):
-            text += " · waiting for free memory"
+            text += " · " + tr("waiting for free memory")
         self.status_bar.set_memory(text)
 
     def _on_worker_stopped(self):
@@ -693,14 +705,13 @@ class MainWindow(QMainWindow):
 
     @Slot(int, dict, float)
     def _on_done(self, row: int, stems: dict, seconds: float):
-        mins, secs = divmod(int(seconds), 60)
-        self._set_item(row, "done", "done", f"done in {mins}m {secs:02d}s", 1.0)
+        self._set_item(row, "done", "done", tr("done in {time}", time=format_duration(seconds)), 1.0)
         self._append_log("Saved:\n  " + "\n  ".join(stems.values()))
 
     @Slot(int, str)
     def _on_failed(self, row: int, message: str):
         if message == "Cancelled":
-            self._set_item(row, "queued", "cancelled", "resumes where it stopped")
+            self._set_item(row, "queued", "cancelled", tr("resumes where it stopped"))
             return
         self._set_item(row, "failed", "failed", message.splitlines()[0][:120])
         self._append_log(f"ERROR: {message}")
@@ -713,14 +724,17 @@ class MainWindow(QMainWindow):
         done = sum(1 for i in range(self.list.count()) if self.list.item(i).data(self.ROLE_STATE) == "done")
         failed = sum(1 for i in range(self.list.count()) if self.list.item(i).data(self.ROLE_STATE) == "failed")
         if cancelled:
-            self.panel.set_message("Cancelled", "Press Split Stems to continue: each song resumes where it stopped.", 0)
+            self.panel.set_message(tr("Cancelled"),
+                                   tr("Press Split Stems to continue: each song resumes where it stopped."), 0)
         elif failed:
-            self.panel.set_message(f"Finished with {failed} error(s) — see the log",
-                                   "Press Split Stems to retry only the songs that failed.")
+            self.panel.set_message(tr_n("Finished with {n} error — see the log",
+                                        "Finished with {n} errors — see the log", failed),
+                                   tr("Press Split Stems to retry only the songs that failed."))
             if not self.btn_log.isChecked():
                 self.btn_log.setChecked(True)
         else:
-            self.panel.set_message(f"All done — {done} song(s) split", f"Saved to {self.out_edit.text()}", 1000)
+            self.panel.set_message(tr_n("All done — {n} song split", "All done — {n} songs split", done),
+                                   tr("Saved to {folder}", folder=self.out_edit.text()), 1000)
         if self._pending_release is not None:
             release, self._pending_release = self._pending_release, None
             self._show_update(release)
@@ -731,7 +745,7 @@ class MainWindow(QMainWindow):
         if self._update_task is not None:
             return
         self._manual_check = manual
-        self.settings_page.set_update_status("Checking for updates…")
+        self.settings_page.set_update_status(tr("Checking for updates…"))
         self.settings_page.btn_check_updates.setEnabled(False)
         self._update_task = Task(lambda progress, cancel: updater.fetch_latest(), self)
         self._update_task.done.connect(self._on_update_checked, Qt.QueuedConnection)
@@ -744,9 +758,10 @@ class MainWindow(QMainWindow):
         self.settings_page.btn_check_updates.setEnabled(True)
         when = time.strftime("%H:%M")
         if release is None or not updater.is_newer(release.version):
-            self.settings_page.set_update_status(f"You have the latest version (checked at {when}).")
+            self.settings_page.set_update_status(tr("You have the latest version (checked at {time}).", time=when))
             return
-        self.settings_page.set_update_status(f"Version {release.version} is available (checked at {when}).")
+        self.settings_page.set_update_status(tr("Version {version} is available (checked at {time}).",
+                                                version=release.version, time=when))
         self._append_log(f"Version {release.version} is available ({release.page})")
         if not self._manual_check and self.settings.value("skipped_version", "") == release.version:
             return
@@ -759,7 +774,7 @@ class MainWindow(QMainWindow):
     def _on_update_check_failed(self, message: str):
         self._update_task = None
         self.settings_page.btn_check_updates.setEnabled(True)
-        self.settings_page.set_update_status(f"Couldn't check for updates: {message}")
+        self.settings_page.set_update_status(tr("Couldn't check for updates: {reason}", reason=message))
         self._append_log(f"Update check failed: {message}")
 
     def _show_update(self, release):
@@ -772,16 +787,38 @@ class MainWindow(QMainWindow):
     def _skip_version(self, version: str):
         self.settings.setValue("skipped_version", version)
 
+    # -- language -----------------------------------------------------------------------
+    @Slot(int)
+    def _on_language_changed(self, _index: int):
+        """The texts are set when the window is built, so a new language needs a restart (offered now)."""
+        self.settings.setValue("language", self.language.currentData())
+        if self._busy():
+            QMessageBox.information(self, APP_NAME, tr("The new language is used the next time StemSplitter starts."))
+            return
+        answer = QMessageBox.question(self, APP_NAME, tr("Restart StemSplitter now to use the new language?"))
+        if answer == QMessageBox.Yes:
+            self.restart()
+
+    def restart(self):
+        """Start a new copy of the app and close this one (settings are saved first)."""
+        self._save_settings()
+        self.settings.sync()  # written out before the new copy reads them
+        args = [] if getattr(sys, "frozen", False) else [str(Path(sys.argv[0]).resolve())]
+        if QProcess.startDetached(sys.executable, args):
+            self.close()
+
     def show_update_result(self, result: dict):
         """Once, after the installer restarted the app."""
         version, previous = result.get("version", "?"), result.get("from", "?")
         if result.get("ok"):
             self._append_log(f"Updated from version {previous} to {version}")
-            QMessageBox.information(self, APP_NAME, f"{APP_NAME} was updated to version {version}.")
+            QMessageBox.information(self, APP_NAME, tr("StemSplitter was updated to version {version}.",
+                                                       version=version))
         else:
             message = result.get("message", "")
             self._append_log(f"The update to version {version} failed: {message}")
-            QMessageBox.warning(self, APP_NAME, f"The update to version {version} was not installed.\n\n{message}")
+            QMessageBox.warning(self, APP_NAME, tr("The update to version {version} was not installed.",
+                                                   version=version) + f"\n\n{message}")
 
     @Slot(str)
     def _append_log(self, text: str):
@@ -789,7 +826,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         if self._busy():
-            if QMessageBox.question(self, APP_NAME, "A song is still being processed. Quit anyway?") != QMessageBox.Yes:
+            if QMessageBox.question(self, APP_NAME, tr("A song is still being processed. Quit anyway?")) \
+                    != QMessageBox.Yes:
                 e.ignore()
                 return
             # Stop at the next chunk boundary and give the worker time to finish the file it is writing.
@@ -813,7 +851,9 @@ def make_app() -> QApplication:
         app.styleHints().setColorScheme(Qt.ColorScheme.Dark)
     except AttributeError:
         pass
-    pick_font_family()
+    saved = str(QSettings(APP_NAME, APP_NAME).value("language", "") or "")
+    language = i18n.set_language(saved or i18n.system_language())  # before any widget is built
+    pick_font_family(language)
     app.setPalette(dark_palette())
     font = QFont(Type.family)
     font.setPixelSize(Type.BODY)
@@ -826,10 +866,10 @@ def make_app() -> QApplication:
 
 
 def run_gui() -> int:
+    app = make_app()  # also sets the language, which the messages below use
     inst = updater.Installation.current()
     if inst is not None:
         updater.recover(inst.root)  # an update interrupted by a crash or a power cut is undone first
-    app = make_app()
     win = MainWindow()
     win.center_on_screen()  # after the whole UI is built, so the size is final
     win.show()

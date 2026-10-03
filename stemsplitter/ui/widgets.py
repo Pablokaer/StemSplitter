@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..i18n import N_, tr, tr_n
 from .icons import icon, logo, pixmap
 from .theme import Colors, Sizes, Spacing
 
@@ -56,6 +57,13 @@ def label(text: str = "", name: str | None = None, wrap: bool = False) -> QLabel
     if name:
         w.setObjectName(name)
     w.setWordWrap(wrap)
+    return w
+
+
+def centered_label(text: str, name: str) -> QLabel:
+    """A centered text that wraps, so a long translation adds a line instead of widening the window."""
+    w = label(text, name, wrap=True)
+    w.setAlignment(Qt.AlignHCenter)
     return w
 
 
@@ -106,8 +114,8 @@ def format_duration(seconds: float) -> str:
     hours, rest = divmod(seconds, 3600)
     mins, secs = divmod(rest, 60)
     if hours:
-        return f"{hours}h {mins:02d}m"
-    return f"{mins}m {secs:02d}s" if mins else f"{secs}s"
+        return tr("{h}h {m:02d}m", h=hours, m=mins)
+    return tr("{m}m {s:02d}s", m=mins, s=secs) if mins else tr("{s}s", s=secs)
 
 
 def format_size(n: int) -> str:
@@ -149,7 +157,7 @@ class ElidedLabel(QLabel):
 class Sidebar(QFrame):
     page_changed = Signal(int)
 
-    PAGES = [("Split", "waveform"), ("Batch", "layers"), ("Settings", "settings"), ("About", "info")]
+    PAGES = [(N_("Split"), "waveform"), (N_("Batch"), "layers"), (N_("Settings"), "settings"), (N_("About"), "info")]
 
     def __init__(self, version: str):
         super().__init__()
@@ -169,7 +177,7 @@ class Sidebar(QFrame):
         titles = QVBoxLayout()
         titles.setSpacing(0)
         titles.addWidget(label("StemSplitter", "appTitle"))
-        titles.addWidget(label("Split any song into stems", "appTagline"))
+        titles.addWidget(label(tr("Split any song into stems"), "appTagline", wrap=True))  # long in some languages
         brand.addLayout(titles, 1)
         lay.addLayout(brand)
         lay.addSpacing(Spacing.XXL + 4)
@@ -177,7 +185,7 @@ class Sidebar(QFrame):
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
         for i, (text, icon_name) in enumerate(self.PAGES):
-            b = QPushButton(f"  {text}")
+            b = QPushButton(f"  {tr(text)}")
             b.setObjectName("navButton")
             b.setCheckable(True)
             b.setFixedHeight(Sizes.BUTTON)
@@ -190,7 +198,7 @@ class Sidebar(QFrame):
         self.group.button(0).setChecked(True)
         self.group.idClicked.connect(self.page_changed)
         lay.addStretch(1)
-        footer = label(f"Version {version}", "sidebarFooter")
+        footer = label(tr("Version {version}", version=version), "sidebarFooter")
         footer.setContentsMargins(Spacing.SM, 0, 0, 0)
         lay.addWidget(footer)
 
@@ -229,17 +237,16 @@ class DropZone(QFrame):
         self.icon = icon_label("upload", Colors.PURPLE_LIGHT, 40)
         lay.addWidget(self.icon, 0, Qt.AlignHCenter)
         lay.addSpacing(Spacing.MD)
-        lay.addWidget(label("Drag & drop audio files here", "dropTitle"), 0, Qt.AlignHCenter)
+        lay.addWidget(centered_label(tr("Drag & drop audio files here"), "dropTitle"))
         lay.addSpacing(Spacing.XS)
-        lay.addWidget(label("Supports MP3, WAV, FLAC, M4A and more. Folders are scanned too.", "hint"),
-                      0, Qt.AlignHCenter)
+        lay.addWidget(centered_label(tr("Supports MP3, WAV, FLAC, M4A and more. Folders are scanned too."), "hint"))
         lay.addSpacing(Spacing.LG + 4)
         row = QHBoxLayout()
         row.setSpacing(Spacing.MD)
         row.addStretch(1)
-        self.btn_add = button("Add Files", "file", "primary", Sizes.BUTTON_PRIMARY, icon_color="#FFFFFF")
+        self.btn_add = button(tr("Add Files"), "file", "primary", Sizes.BUTTON_PRIMARY, icon_color="#FFFFFF")
         self.btn_add.setMinimumWidth(200)
-        self.btn_folder = button("Add Folder", "folder", None, Sizes.BUTTON_PRIMARY)
+        self.btn_folder = button(tr("Add Folder"), "folder", None, Sizes.BUTTON_PRIMARY)
         self.btn_folder.setMinimumWidth(160)
         row.addWidget(self.btn_add)
         row.addWidget(self.btn_folder)
@@ -331,8 +338,8 @@ class FileRow(QFrame):
     check_toggled = Signal(bool)
     remove_clicked = Signal()
 
-    STATE_TITLES = {"queued": "Queued", "running": "Processing…", "done": "Completed", "failed": "Failed",
-                    "cancelled": "Cancelled"}
+    STATE_TITLES = {"queued": N_("Queued"), "running": N_("Processing…"), "done": N_("Completed"),
+                    "failed": N_("Failed"), "cancelled": N_("Cancelled")}
 
     def __init__(self, path: Path):
         super().__init__()
@@ -344,7 +351,7 @@ class FileRow(QFrame):
 
         self.check = QCheckBox()
         self.check.setCursor(Qt.PointingHandCursor)
-        self.check.setToolTip("Select")
+        self.check.setToolTip(tr("Select"))
         self.check.toggled.connect(self.check_toggled)
         lay.addWidget(self.check)
 
@@ -375,7 +382,7 @@ class FileRow(QFrame):
         state = QVBoxLayout()
         state.setSpacing(2)
         state.addStretch(1)
-        self.state_text = label("Queued", "stateText")
+        self.state_text = label(tr("Queued"), "stateText")
         self.state_text.setProperty("state", "queued")
         self.detail = ElidedLabel("", "muted")
         state.addWidget(self.state_text)
@@ -391,7 +398,7 @@ class FileRow(QFrame):
         self.btn_remove.setIcon(icon("close", Colors.TEXT_MUTED, 18, disabled_color="#2A3245"))
         self.btn_remove.setIconSize(QSize(18, 18))
         self.btn_remove.setFixedSize(34, 34)
-        self.btn_remove.setToolTip("Remove from the list")
+        self.btn_remove.setToolTip(tr("Remove from the list"))
         self.btn_remove.setCursor(Qt.PointingHandCursor)
         self.btn_remove.clicked.connect(self.remove_clicked)
         lay.addWidget(self.btn_remove)
@@ -409,7 +416,7 @@ class FileRow(QFrame):
     def set_state(self, kind: str, detail: str = "", fraction: float = 0.0, title: str | None = None) -> None:
         """kind: queued | running | done | failed | cancelled."""
         self.marker.set_state(kind, fraction)
-        self.state_text.setText(title or self.STATE_TITLES[kind])
+        self.state_text.setText(title or tr(self.STATE_TITLES[kind]))
         if self.state_text.property("state") != kind:
             self.state_text.setProperty("state", kind)
             repolish(self.state_text)
@@ -504,12 +511,12 @@ class FileQueue(QFrame):
 
         head = QHBoxLayout()
         head.setSpacing(Spacing.SM)
-        head.addWidget(label("Files to process", "sectionTitle"))
+        head.addWidget(label(tr("Files to process"), "sectionTitle"))
         self.count_label = label("(0)", "sectionCount")
         head.addWidget(self.count_label)
         head.addStretch(1)
-        self.btn_remove = button("Remove selected", "trash", "ghost", Sizes.BUTTON_SMALL, Colors.TEXT_2)
-        self.btn_clear = button("Clear list", "close", "ghost", Sizes.BUTTON_SMALL, Colors.TEXT_2)
+        self.btn_remove = button(tr("Remove selected"), "trash", "ghost", Sizes.BUTTON_SMALL, Colors.TEXT_2)
+        self.btn_clear = button(tr("Clear list"), "close", "ghost", Sizes.BUTTON_SMALL, Colors.TEXT_2)
         head.addWidget(self.btn_remove)
         head.addWidget(self.btn_clear)
         lay.addLayout(head)
@@ -521,8 +528,8 @@ class FileQueue(QFrame):
         el.setSpacing(Spacing.XS)
         el.addWidget(icon_label("music", Colors.TEXT_MUTED, 26), 0, Qt.AlignHCenter)
         el.addSpacing(Spacing.SM)
-        el.addWidget(label("No files added yet", "emptyTitle"), 0, Qt.AlignHCenter)
-        el.addWidget(label("Add an audio file to start separating stems.", "hint"), 0, Qt.AlignHCenter)
+        el.addWidget(centered_label(tr("No files added yet"), "emptyTitle"))
+        el.addWidget(centered_label(tr("Add an audio file to start separating stems."), "hint"))
         self.stack.addWidget(empty)
         self.list = FileList()
         self.stack.addWidget(self.list)
@@ -562,7 +569,7 @@ class OutputSettings(QFrame):
         head = QHBoxLayout()
         head.setSpacing(Spacing.SM + 2)
         head.addWidget(icon_label("settings", Colors.PURPLE_LIGHT, 20))
-        head.addWidget(label("Output Settings", "sectionTitle"))
+        head.addWidget(label(tr("Output Settings"), "sectionTitle"))
         head.addStretch(1)
         lay.addLayout(head)
 
@@ -571,7 +578,7 @@ class OutputSettings(QFrame):
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
         ll.setSpacing(0)
-        ll.addWidget(label("Save stems to", "fieldLabel"))
+        ll.addWidget(label(tr("Save stems to"), "fieldLabel"))
         ll.addSpacing(Spacing.SM)
         row = QHBoxLayout()
         row.setSpacing(Spacing.SM)
@@ -579,15 +586,15 @@ class OutputSettings(QFrame):
         self.out_edit.setFixedHeight(Sizes.CONTROL)
         self.out_edit.setMinimumWidth(120)
         row.addWidget(self.out_edit, 1)
-        self.btn_browse = button("Browse…", "folder", None, Sizes.CONTROL)
+        self.btn_browse = button(tr("Browse…"), "folder", None, Sizes.CONTROL)
         row.addWidget(self.btn_browse)
         ll.addLayout(row)
         ll.addSpacing(Spacing.LG + 4)
-        ll.addWidget(label("Quality", "fieldLabel"))
+        ll.addWidget(label(tr("Quality"), "fieldLabel"))
         ll.addSpacing(Spacing.SM)
         self.quality = combo()
         for text, key in qualities:
-            self.quality.addItem(text, key)
+            self.quality.addItem(tr(text), key)
         ll.addWidget(self.quality)
         ll.addSpacing(Spacing.SM)
         self.quality_hint = label("", "hint", wrap=True)
@@ -599,16 +606,16 @@ class OutputSettings(QFrame):
         rl = QVBoxLayout(right)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(0)
-        rl.addWidget(label("Output format", "fieldLabel"))
+        rl.addWidget(label(tr("Output format"), "fieldLabel"))
         rl.addSpacing(Spacing.SM)
         self.fmt = combo()
         for text, fmt, br in formats:
-            self.fmt.addItem(text, (fmt, br))
+            self.fmt.addItem(tr(text), (fmt, br))
         rl.addWidget(self.fmt)
         rl.addSpacing(Spacing.SM)
-        rl.addWidget(label("One file per stem, in a subfolder for each song.", "hint", wrap=True))
+        rl.addWidget(label(tr("One file per stem, in a subfolder for each song."), "hint", wrap=True))
         rl.addSpacing(Spacing.LG + 4)
-        rl.addWidget(label("Stems to extract", "fieldLabel"))
+        rl.addWidget(label(tr("Stems to extract"), "fieldLabel"))
         rl.addSpacing(Spacing.SM)
         self.stem_grid = QWidget()
         grid = QGridLayout(self.stem_grid)
@@ -617,8 +624,8 @@ class OutputSettings(QFrame):
         grid.setVerticalSpacing(Spacing.SM)
         self.stem_checks: dict[str, QCheckBox] = {}
         for i, (name, text, tip) in enumerate(stems):
-            chk = QCheckBox(text)
-            chk.setToolTip(tip)
+            chk = QCheckBox(tr(text))
+            chk.setToolTip(tr(tip))
             chk.setCursor(Qt.PointingHandCursor)
             chk.setMinimumHeight(28)
             grid.addWidget(chk, i // 2, i % 2)
@@ -703,23 +710,23 @@ class ProcessingPanel(QFrame):
         self.nums.setMinimumWidth(130)
         lay.addWidget(self.nums)
 
-        self.btn_log = button("Show log", "log", None, Sizes.BUTTON_SMALL + 4, Colors.TEXT_2)
+        self.btn_log = button(tr("Show log"), "log", None, Sizes.BUTTON_SMALL + 4, Colors.TEXT_2)
         self.btn_log.setCheckable(True)
-        self.btn_log.setToolTip("Show or hide the log")
-        self.btn_open = button("Open output folder", "folder-open", None, Sizes.BUTTON_SMALL + 4, Colors.TEXT_2)
-        self.btn_open.setToolTip("Open the output folder")
-        self.btn_cancel = button("Cancel", "stop", "danger", Sizes.BUTTON, Colors.RED)
+        self.btn_log.setToolTip(tr("Show or hide the log"))
+        self.btn_open = button(tr("Open output folder"), "folder-open", None, Sizes.BUTTON_SMALL + 4, Colors.TEXT_2)
+        self.btn_open.setToolTip(tr("Open the output folder"))
+        self.btn_cancel = button(tr("Cancel"), "stop", "danger", Sizes.BUTTON, Colors.RED)
         self.btn_cancel.setMinimumWidth(120)
-        self.btn_start = button("Split Stems", "waveform", "primary", Sizes.BUTTON_PRIMARY, "#FFFFFF")
+        self.btn_start = button(tr("Split Stems"), "waveform", "primary", Sizes.BUTTON_PRIMARY, "#FFFFFF")
         self.btn_start.setMinimumWidth(170)
         for b in (self.btn_log, self.btn_open, self.btn_cancel, self.btn_start):
             lay.addWidget(b)
-        self._labels = {self.btn_log: "Show log", self.btn_open: "Open output folder"}
+        self._labels = {self.btn_log: tr("Show log"), self.btn_open: tr("Open output folder")}
         self.btn_log.toggled.connect(self._log_text)
         self.set_running(False)
 
     def _log_text(self, on: bool) -> None:
-        self._labels[self.btn_log] = "Hide log" if on else "Show log"
+        self._labels[self.btn_log] = tr("Hide log") if on else tr("Show log")
         self._apply_compact()
 
     def _apply_compact(self) -> None:
@@ -740,7 +747,7 @@ class ProcessingPanel(QFrame):
         self.tile_icon.setPixmap(pixmap("music" if running else "waveform", Colors.PURPLE_LIGHT, 24))
         if running:
             self.btn_cancel.setEnabled(True)
-            self.btn_cancel.setText(" Cancel")
+            self.btn_cancel.setText(f" {tr('Cancel')}")
 
     def set_message(self, title: str, detail: str, progress: int | None = None) -> None:
         """Idle / finished: a heading and a line of detail; `progress` (0..1000) shows the bar."""
@@ -757,10 +764,12 @@ class ProcessingPanel(QFrame):
         self.set_progress(int(fraction * 1000))
         self.percent.setText(f"{fraction:.0%}")
         self.eta.setText(eta)
+        margins = self.nums.layout().contentsMargins()  # "Estimating time…" is longer in some languages
+        self.nums.setMinimumWidth(max(130, self.eta.sizeHint().width() + margins.left() + margins.right()))
 
     def set_cancelling(self) -> None:
-        self.detail.setText("Cancelling after the current step…")
-        self.btn_cancel.setText(" Cancelling…")
+        self.detail.setText(tr("Cancelling after the current step…"))
+        self.btn_cancel.setText(f" {tr('Cancelling…')}")
         self.btn_cancel.setEnabled(False)
 
     def set_progress(self, value: int) -> None:
@@ -786,7 +795,7 @@ class StatusBar(QFrame):
         lay.setContentsMargins(Spacing.XXL, 0, Spacing.XXL, 0)
         lay.setSpacing(Spacing.SM)
         lay.addWidget(icon_label("chip", Colors.TEXT_MUTED, 16))
-        self.device = ElidedLabel("Device: detected when songs are added", "statusText")
+        self.device = ElidedLabel(tr("Device: detected when songs are added"), "statusText")
         lay.addWidget(self.device, 3)
         self.memory_icon = icon_label("memory", Colors.TEXT_MUTED, 16)
         lay.addWidget(self.memory_icon)
@@ -800,7 +809,7 @@ class StatusBar(QFrame):
         self._counts = None
 
     def set_device(self, text: str) -> None:
-        self.device.setText(f"Processing on: {text}")
+        self.device.setText(tr("Processing on: {device}", device=text))
         self.device.setToolTip(text)
 
     def set_memory(self, text: str) -> None:
@@ -816,13 +825,13 @@ class StatusBar(QFrame):
             w.hide()  # deleteLater alone leaves the old text on screen until the next event loop pass
             w.deleteLater()
         self._items = []
-        parts = [(f"{total} file{'s' if total != 1 else ''}", None)]
+        parts = [(tr_n("{n} file", "{n} files", total), None)]
         if done:
-            parts.append((f"{done} completed", Colors.GREEN))
+            parts.append((tr("{n} completed", n=done), Colors.GREEN))
         if running:
-            parts.append((f"{running} processing", Colors.PURPLE_LIGHT))
+            parts.append((tr("{n} processing", n=running), Colors.PURPLE_LIGHT))
         if failed:
-            parts.append((f"{failed} failed", Colors.RED))
+            parts.append((tr("{n} failed", n=failed), Colors.RED))
         for i, (text, dot) in enumerate(parts):
             if i:
                 self._add(label("|", "statusText"))
