@@ -393,5 +393,40 @@ class DownloadTests(unittest.TestCase):
         U._check_url("https://github.com/x")
 
 
+@unittest.skipUnless(sys.platform.startswith("win"), "the installer's uninstall entry is in the Windows registry")
+class InstalledVersionTest(unittest.TestCase):
+    """set_installed_version on a scratch key shaped like the installer's uninstall entry."""
+
+    KEY = r"Software\StemSplitterTest\Uninstall"
+
+    def setUp(self):
+        import winreg
+
+        self.winreg = winreg
+        self.saved, U.UNINSTALL_KEY = U.UNINSTALL_KEY, self.KEY
+        self.app = Path(tempfile.mkdtemp()) / "StemSplitter"
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, self.KEY) as key:
+            winreg.SetValueEx(key, "InstallLocation", 0, winreg.REG_SZ, str(self.app) + "\\")  # as Inno writes it
+            winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, "1.0.0")
+
+    def tearDown(self):
+        U.UNINSTALL_KEY = self.saved
+        self.winreg.DeleteKey(self.winreg.HKEY_CURRENT_USER, self.KEY)
+        self.winreg.DeleteKey(self.winreg.HKEY_CURRENT_USER, r"Software\StemSplitterTest")
+        shutil.rmtree(self.app.parent, ignore_errors=True)
+
+    def version(self) -> str:
+        with self.winreg.OpenKey(self.winreg.HKEY_CURRENT_USER, self.KEY) as key:
+            return self.winreg.QueryValueEx(key, "DisplayVersion")[0]
+
+    def test_installed_copy_updates_the_entry(self):
+        self.assertTrue(U.set_installed_version(self.app, "1.2.0"))
+        self.assertEqual(self.version(), "1.2.0")
+
+    def test_portable_copy_leaves_it_alone(self):
+        self.assertFalse(U.set_installed_version(self.app.parent / "Portable" / "StemSplitter", "9.9.9"))
+        self.assertEqual(self.version(), "1.0.0")
+
+
 if __name__ == "__main__":
     unittest.main()

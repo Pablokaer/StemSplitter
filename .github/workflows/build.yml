@@ -54,9 +54,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+        # --notes is put before the generated notes: which file to download, for the people on the release page
         run: |
           gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" --draft --generate-notes --title "StemSplitter ${GITHUB_REF_NAME#v}"
+            gh release create "$GITHUB_REF_NAME" --draft --generate-notes --title "StemSplitter ${GITHUB_REF_NAME#v}" \
+              --notes "**Download:** Windows: \`StemSplitter-Windows-x64-Setup.exe\` (run it to install). Mac: \`StemSplitter-macOS-AppleSilicon.zip\`. The other files are a portable Windows zip and the lists the app uses to update itself."
 
   build:
     needs: lint
@@ -211,6 +213,48 @@ jobs:
             echo "::error title=macOS self-test of the copy installed from the archive failed::exit code $code"
           fi
           exit $code
+
+      - name: Installer (Windows)
+        # Inno Setup (installer/StemSplitter.iss): StemSplitter-<platform>-Setup.exe, the download meant for users.
+        # Like every release file it must stay under 2 GiB, so the size and its room under the limit are logged.
+        if: steps.gate.outputs.skip != 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE) { exit 1 }
+          }
+          $version = python -c "import stemsplitter; print(stemsplitter.__version__)"
+          $name = "StemSplitter-${{ matrix.name }}-Setup"
+          & $iscc /Q "/DAppVersion=$version" "/DSourceDir=$PWD\dist\StemSplitter" "/DOutputDir=$PWD\release" "/DOutputName=$name" installer\StemSplitter.iss
+          if ($LASTEXITCODE) { exit 1 }
+          $size = (Get-Item "release\$name.exe").Length
+          "installer: {0:N0} bytes ({1:N0} MB below the 2 GiB release limit)" -f $size, ((2GB - $size) / 1MB)
+          if ($size -ge 2GB) {
+            "::error title=Installer too big for a release::$name.exe is $size bytes, over GitHub's 2 GiB limit for a release file."
+            exit 1
+          }
+
+      - name: Install, self-test and uninstall with the installer (Windows)
+        # the same silent install a user's double-click does, into a temporary folder, then the uninstaller,
+        # which must leave nothing behind
+        if: steps.gate.outputs.skip != 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = "$env:RUNNER_TEMP\installed\StemSplitter"
+          $log = "$env:RUNNER_TEMP\setup.log"
+          $p = Start-Process "release\StemSplitter-${{ matrix.name }}-Setup.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=`"$dir`"", "/LOG=`"$log`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content $log -Tail 40; exit 1 }
+          $p = Start-Process "$dir\StemSplitter.exe" -ArgumentList "--selftest" -Wait -PassThru
+          Get-Content "$env:LOCALAPPDATA\StemSplitter\selftest.txt"
+          if ($p.ExitCode -ne 0) { exit 1 }
+          $p = Start-Process "$dir\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
+          Start-Sleep 10  # the uninstaller finishes from a temporary copy of itself
+          if ($p.ExitCode -ne 0 -or (Test-Path $dir)) {
+            "::error title=Uninstall incomplete::the uninstaller exited with $($p.ExitCode) and left $dir behind"
+            exit 1
+          }
 
       - uses: actions/upload-artifact@v4
         # branch builds only need to pass; downloads are kept for releases and manual runs

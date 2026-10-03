@@ -846,6 +846,30 @@ def launch(root: Path, exe: str) -> None:
         subprocess.Popen(args, cwd=root, start_new_session=True, close_fds=True)
 
 
+# the uninstall entry the Windows installer writes (installer/StemSplitter.iss: "{" + AppId + "}_is1")
+UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{CDC6E5C7-65E0-4703-9939-D1D647383BFC}_is1"
+
+
+def set_installed_version(root: Path, version: str) -> bool:
+    """Keep the version shown in Windows' installed-apps list right after a self-update.
+
+    Only for the copy the installer put there (its InstallLocation is `root`): a portable copy never touches it."""
+    if not sys.platform.startswith("win"):
+        return False
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY, 0,
+                            winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE) as key:
+            location = str(winreg.QueryValueEx(key, "InstallLocation")[0])
+            if os.path.normcase(os.path.abspath(location)) != os.path.normcase(os.path.abspath(root)):
+                return False
+            winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, version)
+            return True
+    except OSError:
+        return False
+
+
 def install(work: Path, status: Callable[[str], None] = lambda text: None,
             selftest: Callable[[Path], tuple[bool, str]] = run_selftest) -> dict:
     """The helper's job (`--apply-update`): replace the files, check the new version, undo it if anything fails.
@@ -870,6 +894,7 @@ def install(work: Path, status: Callable[[str], None] = lambda text: None,
         ok, report = selftest(root / plan["exe"])
         if ok:
             result.update(ok=True, message="")
+            set_installed_version(root, plan["version"])
         else:
             result["message"] = tr("The new version failed its self-test, so the previous version was kept.") + \
                                 "\n\n" + report[-3000:]
