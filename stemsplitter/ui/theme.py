@@ -70,8 +70,7 @@ class Type:
 
 
 class Sizes:
-    WINDOW = (1400, 850)
-    WINDOW_MIN = (1100, 700)
+    WINDOW_MIN = (1100, 700)  # also the size the window opens at
     SIDEBAR = 248
     CONTROL = 44  # line edits and combo boxes
     BUTTON = 44

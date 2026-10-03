@@ -297,15 +297,24 @@ class MainWindow(QMainWindow):
         memlog("window created (GUI process)", self._append_log)
 
     def _fit_to_screen(self):
-        w, h = Sizes.WINDOW
+        """Open at the minimum size; `center_on_screen` places the window once the UI is built."""
         min_w, min_h = Sizes.WINDOW_MIN
         screen = QGuiApplication.primaryScreen()
         if screen is not None:  # small or scaled-up screens: never open larger than the screen
             avail = screen.availableGeometry()
             min_w, min_h = min(min_w, avail.width()), min(min_h, avail.height() - 40)
-            w, h = min(w, int(avail.width() * 0.92)), min(h, int(avail.height() * 0.92))
         self.setMinimumSize(min_w, min_h)
-        self.resize(max(w, min_w), max(h, min_h))
+        self.resize(min_w, min_h)
+
+    def center_on_screen(self):
+        """Center the whole window, title bar included, on the primary screen's work area."""
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        self.winId()  # creates the native window, so frameGeometry() includes the title bar and borders
+        frame = self.frameGeometry()
+        frame.moveCenter(screen.availableGeometry().center())
+        self.move(frame.topLeft())
 
     # -- UI -----------------------------------------------------------------------------
     def _build_ui(self):
@@ -741,5 +750,6 @@ def run_gui() -> int:
         app.setWindowIcon(QIcon(str(icon)))
     app.setStyleSheet(stylesheet())
     win = MainWindow()
+    win.center_on_screen()  # after the whole UI is built, so the size is final
     win.show()
     return app.exec()
