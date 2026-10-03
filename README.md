@@ -53,11 +53,11 @@ The apps are built for you by GitHub Actions (free), because a Windows build has
    *Or* publish a release: set the version in `stemsplitter/__init__.py`, then `git tag v1.0.0 && git push --tags` (the tag must match that version). The release is published when both builds pass, and installed apps are offered the update.
    (Every push is also linted, built and self-tested, so a broken build shows up right away. Downloads are only kept for manual runs and tags.)
 3. After about 15–25 minutes, download:
-   * `StemSplitter-Windows-x64.zip.001`, `.002`, …: a zip cut into parts, because GitHub doesn't accept files over 2 GB. Download all the parts into one folder, open the `.001` with [7-Zip](https://www.7-zip.org), extract it, and run `StemSplitter\StemSplitter.exe`. It uses an NVIDIA GPU when the PC has one and falls back to the CPU otherwise. It is a ~2.5 GB download because it includes CUDA (the size of the earlier single zip; not measured again with the parts).
-   * `StemSplitter-macOS-AppleSilicon.zip`: unzip it and drag `StemSplitter.app` to Applications
-   * *(optional)* `StemSplitter-Windows-x64-CPU.zip.001` (one part, open it with 7-Zip): tick "CPU-only" when you run the workflow. It is a much smaller download for PCs without an NVIDIA GPU, and is only available from the workflow run's Artifacts.
+   * **Windows:** `StemSplitter-Windows-x64.zip`, a single file. Right-click it → **Extract All** (or use 7-Zip), then run `StemSplitter\StemSplitter.exe`. It uses an NVIDIA GPU when the PC has one and falls back to the CPU otherwise. It is a ~2.1 GB download because it includes CUDA. Extract it somewhere with a short path, such as your Downloads folder: Windows' built-in extractor silently skips files whose full path is longer than 260 characters, and the app's deepest file sits ~150 characters inside the zip.
+   * **Mac:** `StemSplitter-macOS-AppleSilicon.zip`: unzip it and drag `StemSplitter.app` to Applications
+   * *(optional)* `StemSplitter-Windows-x64-CPU.zip`: tick "CPU-only" when you run the workflow. It is a much smaller download for PCs without an NVIDIA GPU, and is only available from the workflow run's Artifacts.
 
-Each download comes with a `.files.json` file: the list of files the app uses to update itself. You don't need it to install.
+   You can ignore the other files on the release page: `.files.json` is the list of files the app uses to update itself, and *Source code* is the code. (If a future Windows build ever grows past GitHub's 2 GiB limit for one file, it is published as `.zip.001`, `.002`, … parts instead: download them all into one folder and open the `.001` with [7-Zip](https://www.7-zip.org).)
 
 ### First launch
 

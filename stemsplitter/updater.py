@@ -4,8 +4,8 @@
 2. **Plan:** each release has a file index per build (`StemSplitter-<platform>.files.json`: path, size and
    SHA-256 of every file of the packaged app). The installed files are hashed and only the ones that differ
    are needed, so an update that only changes the app's code downloads a few MB, not the whole 2+ GB build.
-3. **Download:** the release archive is a zip (split in parts on Windows, where a release file can't exceed
-   2 GB). Its central directory is read with HTTP range requests and only the needed members are downloaded,
+3. **Download:** the release archive is a zip, or a zip cut into parts (`.zip.001`, …) when it is too big for
+   one release file (2 GiB). Its central directory is read with HTTP range requests and only the needed members are downloaded,
    unpacked and checked against the index, into a staging folder next to the app (`.ss-update/n`).
 4. **Install:** the running app can't replace its own files: its Python code is read from the executable
    while it runs, so a replaced executable breaks the next import. It hard-links a copy of itself into the work
