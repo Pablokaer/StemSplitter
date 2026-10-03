@@ -314,8 +314,10 @@ class _Track:
 
     def __init__(self, path: Path, frames: int, mode: str = "r") -> None:
         if mode == "w+":
-            with open(path, "wb") as f:
-                f.truncate(frames * 8)  # zeros (sparse where the file system allows it)
+            # An empty file that grows as it is written: every "w+" track is written from start to end
+            # before anything reads it. (Pre-sizing it with truncate() made NTFS write zeros first, ~85 MB
+            # per 4-minute track, which the real samples then overwrote.)
+            open(path, "wb").close()
         self._f = open(path, "rb" if mode == "r" else "r+b")
         self._lock = threading.Lock()
         self.frames = frames
