@@ -2,6 +2,7 @@
 #   pyinstaller --noconfirm StemSplitter.spec
 # Produces dist/StemSplitter/ (Windows/Linux) or dist/StemSplitter.app (macOS).
 
+import fnmatch
 import json
 import os
 import re
@@ -65,6 +66,15 @@ a = Analysis(
               "torchaudio", "tensorboard", "imageio_ffmpeg", "pytest", "triton", "pkg_resources"],
     noarchive=False,
 )
+
+# CUDA DLLs from the PyTorch wheel that nothing in the app loads: no DLL imports them (dumpbin /dependents)
+# and torch only loads them by scanning its lib folder. Multi-GPU cuSOLVER, the alternative NVRTC build and
+# the profiler's metrics library (~140 MB compressed): without them the CUDA build fits in a single release
+# zip under GitHub's 2 GiB limit. A GPU split was bit-identical with and without them (docs, 6.2).
+UNUSED_DLLS = ("cusolvermg64_*.dll", "nvrtc64_*.alt.dll", "nvperf_host.dll")
+a.binaries = [b for b in a.binaries if not any(fnmatch.fnmatch(Path(b[0]).name.lower(), p) for p in UNUSED_DLLS)]
+a.datas = [d for d in a.datas if not any(fnmatch.fnmatch(Path(d[0]).name.lower(), p) for p in UNUSED_DLLS)]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
