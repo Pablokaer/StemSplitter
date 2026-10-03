@@ -54,7 +54,7 @@ def run_jobs(engine, jobs: list[tuple[int, Path]], opts, cancel, emit: Emit) -> 
     from .engine import Cancelled
 
     def write(row: int, separated, progress) -> bool:
-        """Writer thread: save one song and report it as soon as its files are on disk."""
+        """Writer thread: assemble and save one song, and report it as soon as its files are on disk."""
         try:
             res = engine.write_stems(separated, opts, progress, cancel)
             emit("done", row, {k: str(v) for k, v in res.stems.items()}, res.seconds)
@@ -75,17 +75,21 @@ def run_jobs(engine, jobs: list[tuple[int, Path]], opts, cancel, emit: Emit) -> 
     # it (the stems are in files, but the encoders still need some). At most one song waits.
     with ThreadPoolExecutor(max_workers=1) as writer:
         pending = None  # future of the song being written
+        pending_path = None
         try:
             for row, path in jobs:
-                if pending is not None and engine.gov.level() != "relaxed":
-                    cancelled = wait(pending) or cancelled  # one song at a time while memory is short
+                # one song at a time while memory is short, and for the same file twice in a row (both
+                # would use one work folder, which the writer removes when it is done)
+                if pending is not None and (engine.gov.level() != "relaxed"
+                                            or Path(path).resolve() == Path(pending_path).resolve()):
+                    cancelled = wait(pending) or cancelled
                     pending = None
                 if cancel.is_set():
                     cancelled = True
                     break
                 progress = lambda f, t, r=row: emit("status", r, f, t)  # noqa: E731
                 try:
-                    separated = engine.split(path, opts, progress, cancel)
+                    separated = engine.split(path, opts, progress, cancel, assemble=False)  # see write()
                 except Cancelled:
                     cancelled = True
                     emit("failed", row, "Cancelled")
@@ -95,7 +99,7 @@ def run_jobs(engine, jobs: list[tuple[int, Path]], opts, cancel, emit: Emit) -> 
                     emit("failed", row, str(exc) or exc.__class__.__name__)
                     continue
                 cancelled = wait(pending) or cancelled
-                pending = writer.submit(write, row, separated, progress)
+                pending, pending_path = writer.submit(write, row, separated, progress), path
                 del separated  # the writer holds the only reference: freed as soon as it is written
         finally:
             cancelled = wait(pending) or cancelled

@@ -94,18 +94,20 @@ def run_cli(argv: list[str]) -> int:
             print(f"  {name:<13} {p}")
 
     # like the GUI: encode song N on a writer thread while song N+1 is being separated
-    pending = None
+    pending = prev = None
     try:
         with ThreadPoolExecutor(max_workers=1) as writer:
             for f in args.files:
-                if pending is not None and engine.gov.level() != "relaxed":
-                    report(pending)  # one song at a time while memory is short
+                # one song at a time while memory is short, and for the same file twice in a row (one
+                # work folder, which the writer removes when it is done)
+                if pending is not None and (engine.gov.level() != "relaxed" or f.resolve() == prev.resolve()):
+                    report(pending)
                     pending = None
                 print(f"\n==> {f}")
-                separated = engine.split(f, opts, progress)
+                separated = engine.split(f, opts, progress, assemble=False)  # assembled on the writer
                 if pending is not None:
                     report(pending)
-                pending = writer.submit(engine.write_stems, separated, opts, lambda frac, text: None)
+                pending, prev = writer.submit(engine.write_stems, separated, opts, lambda frac, text: None), f
             if pending is not None:
                 report(pending)
     finally:

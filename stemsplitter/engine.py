@@ -89,7 +89,7 @@ OUTPUTS = {
 MODEL_STEMS = ["Vocals", "Drums", "Bass", "Guitar", "Piano"]  # the stem model's outputs that are used
 DEFAULT_STEMS = ("Vocals", "Drums", "Bass", "Other")
 BLOCK_FRAMES = SAMPLE_RATE * 10  # 10 s: the unit for decoding, assembling and encoding (~3.5 MB per stem)
-WORK_VERSION = 1  # bump when the work-folder layout changes (old checkpoints are then ignored)
+WORK_VERSION = 2  # bump when the work-folder layout changes (old checkpoints are then ignored)
 CHECKPOINT_SECONDS = 15
 STALE_WORK_SECONDS = 7 * 24 * 3600
 CHUNK_NEED_DEFAULT = 768 * MB  # memory asked for one inference chunk until the real cost is measured
@@ -170,6 +170,17 @@ class Result:
 
 
 @dataclass
+class _PendingAssembly:
+    """What write_stems needs to build the stems itself (see split(assemble=False))."""
+
+    frames: int
+    names: list[str]
+    outputs: list[str]
+    gain: float
+    maximum: bool
+
+
+@dataclass
 class Separated:
     """The stems of one song (samples x channels float32, as arrays or files), ready to write."""
 
@@ -180,6 +191,7 @@ class Separated:
     started: float
     work: Optional["_Work"] = None  # the song's work folder, removed once every file is written
     peaks: dict[str, float] = field(default_factory=dict)  # per stem, for the clipping protection
+    pending: Optional[_PendingAssembly] = None  # set when write_stems still has to assemble the stems
 
 
 # --------------------------------------------------------------------------------------
@@ -302,8 +314,10 @@ class _Track:
 
     def __init__(self, path: Path, frames: int, mode: str = "r") -> None:
         if mode == "w+":
-            with open(path, "wb") as f:
-                f.truncate(frames * 8)  # zeros (sparse where the file system allows it)
+            # An empty file that grows as it is written: every "w+" track is written from start to end
+            # before anything reads it. (Pre-sizing it with truncate() made NTFS write zeros first, ~85 MB
+            # per 4-minute track, which the real samples then overwrote.)
+            open(path, "wb").close()
         self._f = open(path, "rb" if mode == "r" else "r+b")
         self._lock = threading.Lock()
         self.frames = frames
@@ -387,6 +401,20 @@ class _Work:
             tmp = self.dir / "state.json.tmp"
             tmp.write_text(json.dumps(self.state), encoding="utf-8")
             os.replace(tmp, self.dir / "state.json")
+
+    def forget(self, *keys: str) -> None:
+        """Remove steps from the checkpoint, so they run again."""
+        with self._lock:
+            for key in keys:
+                self.state.pop(key, None)
+        self.save()
+
+    def complete(self, name: str, frames: int) -> bool:
+        """True if the track holds all `frames` (nothing is fsync'ed: a power cut can leave it short)."""
+        try:
+            return self.path(name).stat().st_size >= frames * 8
+        except OSError:
+            return False
 
     def drop(self, *names: str) -> None:
         for name in names:
@@ -666,17 +694,23 @@ class StemEngine:
         step = chunk // mi.overlap
         instruments = [str(i).lower() for i in cfg.training.instruments]
         target = cfg.training.target_instrument
-        rows = {name: (0 if target else instruments.index(name)) for name in outputs}
+        # Only the instruments that are written are accumulated (the model also returns e.g. its own "other",
+        # or 5 stems nobody asked for): each kept sample goes through exactly the same operations as before.
+        # A single-target model returns no instrument dimension; its output broadcasts into the one row.
+        model_rows = sorted({0 if target else instruments.index(name) for name in outputs})
+        rows = {name: model_rows.index(0 if target else instruments.index(name)) for name in outputs}
         device = next(mi.model_run.parameters()).device
+        pick = None if target or len(model_rows) == len(instruments) else torch.tensor(model_rows, device=device)
         estimated = mdxc._estimate_roformer_full_track_buffer_bytes(len(instruments), 2, frames, chunk)
         acc = device if mdxc.should_accumulate_on_device(device, estimated) else torch.device("cpu")
         window = torch.tensor(signal.windows.hamming(chunk), dtype=torch.float32, device=acc)
         starts = mi._roformer_chunk_starts(frames, chunk, step)
-        shape = (len(instruments), 2, chunk)
+        shape = (len(model_rows), 2, chunk)
+        counter_shape = (1, 1, chunk)  # the window sum is the same for every instrument and channel
 
         mix = work.array("mix", frames, "r")
         saved = dict(work.state.get(tag) or {})
-        resumable = all(work.path(f).is_file() for f in outputs.values())
+        resumable = all(work.path(f).is_file() for f in outputs.values()) and saved.get("rows") == model_rows
         if resumable and saved.get("next") and (work.dir / saved.get("window", "-")).is_file():
             k0, base = saved["next"], saved["base"]
             with np.load(work.dir / saved["window"]) as buffers:  # closed at once (Windows can't delete open files)
@@ -687,7 +721,7 @@ class StemEngine:
         else:
             k0, base = 0, 0
             result = torch.zeros(shape, dtype=torch.float32, device=acc)
-            counter = torch.zeros(shape, dtype=torch.float32, device=acc)
+            counter = torch.zeros(counter_shape, dtype=torch.float32, device=acc)
             outs = {name: work.array(f, frames, "w+") for name, f in outputs.items()}
 
         def flush(n: int) -> None:
@@ -705,7 +739,7 @@ class StemEngine:
             name = f"{tag}-{k_next}.npz"
             np.savez(work.dir / name, result=result.cpu().numpy(), counter=counter.cpu().numpy())
             old = saved.get("window")
-            work.save(**{tag: {"next": k_next, "base": base, "window": name}})
+            work.save(**{tag: {"next": k_next, "base": base, "window": name, "rows": model_rows}})
             saved["window"] = name
             if old and old != name:
                 work.unlink(old)
@@ -737,6 +771,8 @@ class StemEngine:
                 length = part.shape[-1]
                 try:
                     x = mi._run_roformer_model(part)
+                    if pick is not None:
+                        x = x.index_select(0, pick)  # before the copy to `acc`: only the kept rows move
                     if x.device != acc:
                         x = x.to(acc)
                 except Exception as exc:
@@ -829,11 +865,14 @@ class StemEngine:
         return frames, peak
 
     def split(
-        self, input_path: Path, opts: Options, progress: ProgressFn, cancel: Optional[threading.Event] = None
+        self, input_path: Path, opts: Options, progress: ProgressFn, cancel: Optional[threading.Event] = None,
+        assemble: bool = True,
     ) -> Separated:
         """Decode and separate one song into stem files in its work folder (see write_stems).
 
         A song that was cancelled or interrupted (crash, power cut) continues where it stopped.
+        assemble=False returns as soon as the models are done and leaves building the final stems to
+        write_stems: in a batch that runs on the writer thread, so the next song reaches the GPU sooner.
         """
         t0 = time.time()
         input_path = Path(input_path)
@@ -868,6 +907,19 @@ class StemEngine:
                 a, b = stages[name]
                 return lambda frac, text: progress(a + (b - a) * max(0.0, min(1.0, frac)), text)
 
+            # A step recorded as done whose files came out short (a power cut before the OS wrote them)
+            # runs again, instead of failing on every retry.
+            if st.get("frames") and not work.complete("mix", st["frames"]):
+                work.forget(*list(st))
+            elif st.get("assembled") and not all(work.complete(f"out_{k}", st["frames"]) for k in outputs):
+                work.forget("stems", "vocals", "assembled", "peaks", "encoded")  # their inputs were dropped
+            elif not st.get("assembled"):  # (after the assembly the model outputs are gone on purpose)
+                if (st.get("stems") or {}).get("done") and not all(work.complete(f"sw_{k}", st["frames"])
+                                                                   for k in names):
+                    work.forget("stems")
+                if (st.get("vocals") or {}).get("done") and not work.complete("mel_Vocals", st["frames"]):
+                    work.forget("vocals")
+
             # 1) decode ----------------------------------------------------------------------
             if st.get("frames"):
                 frames, peak = st["frames"], st["peak"]
@@ -897,10 +949,12 @@ class StemEngine:
                                        {"vocals": "mel_Vocals"}, "vocals", "Refining vocals", stage("vocals"))
                     lap("vocals")
 
-                # 4) assemble -----------------------------------------------------------------------
+                # 4) assemble (here, or in write_stems) ---------------------------------------------
+                pending = _PendingAssembly(frames, names, outputs, gain, refine_vocals)
+                if not assemble:
+                    return Separated(input_path, {}, SAMPLE_RATE, timings, t0, work=work, pending=pending)
                 stage("mix")(0, "Assembling stems...")
-                self._assemble(work, frames, names, outputs, gain, refine_vocals)
-                work.drop(*(f"sw_{k}" for k in names), "mel_Vocals")
+                self._finish_assembly(work, pending)
             stems = {k: work.array(f"out_{k}", frames, "r") for k in outputs}
             memlog("stems assembled", self.log)
             return Separated(input_path, stems, SAMPLE_RATE, timings, t0, work=work,
@@ -917,8 +971,14 @@ class StemEngine:
             raise RuntimeError(f"Not enough free disk space: {need / GB:.1f} GB needed in {work.dir.parent}, "
                                f"{free / GB:.1f} GB free")
 
+    def _finish_assembly(self, work: _Work, a: _PendingAssembly,
+                         check: Optional[Callable[[], None]] = None) -> None:
+        """Build the final stems and drop the model outputs they came from."""
+        self._assemble(work, a.frames, a.names, a.outputs, a.gain, a.maximum, check)
+        work.drop(*(f"sw_{k}" for k in a.names), "mel_Vocals")
+
     def _assemble(self, work: _Work, frames: int, names: list[str], finals: list[str], gain: float,
-                  maximum: bool) -> None:
+                  maximum: bool, check: Optional[Callable[[], None]] = None) -> None:
         """Build the `finals` block by block (same operations, in the same order, as in memory).
 
         `names` are the model stems (see model_stems()). Vocals = average of the two models in
@@ -931,9 +991,10 @@ class StemEngine:
         mel = work.array("mel_Vocals", frames, "r") if maximum else None
         out = {k: work.array(f"out_{k}", frames, "w+") for k in finals}
         peaks = dict.fromkeys(finals, 0.0)
+        check = check or HUB.check_cancel
         for i in range(0, frames, BLOCK_FRAMES):
             j = min(frames, i + BLOCK_FRAMES)
-            HUB.check_cancel()
+            check()
             block = {k: np.array(src[k][i:j]) for k in names}
             if maximum:
                 block["Vocals"] += mel[i:j]  # same as 0.5 * (vocals + kim)
@@ -971,6 +1032,13 @@ class StemEngine:
         the next song is being separated.
         """
         t = time.time()
+        if sep.pending is not None:  # split(assemble=False): build the stems here, off the GPU thread
+            progress(0.93, "Assembling stems...")
+            self._finish_assembly(sep.work, sep.pending, lambda: _raise_if(cancel))
+            sep.stems = {k: sep.work.array(f"out_{k}", sep.pending.frames, "r") for k in sep.pending.outputs}
+            sep.peaks = dict(sep.work.state.get("peaks", {}))
+            sep.pending = None
+            memlog("stems assembled", self.log)
         song = sep.input_path.stem
         dest = Path(opts.output_dir) / _safe_name(song)
         dest.mkdir(parents=True, exist_ok=True)
