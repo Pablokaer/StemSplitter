@@ -44,6 +44,7 @@ def model_instance(target: bool = False, device: str = "cpu", delay: float = 0.0
         training=SimpleNamespace(instruments=instruments, target_instrument="vocals" if target else None),
     )
     mi = SimpleNamespace(model_data_cfgdict=cfg, segment_size=256, overlap=overlap, model_run=net)
+    mi._use_model_segment_override = lambda seconds: seconds < 10.0  # the library's rule for short clips
     mi._run_roformer_model = lambda part: net(part.unsqueeze(0))[0]
     mi.overlap_add = lambda result, x, w, start, length: mdxc.MDXCSeparator.overlap_add(None, result, x, w, start,
                                                                                          length)
