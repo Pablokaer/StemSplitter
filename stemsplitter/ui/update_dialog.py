@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from .. import APP_NAME, __version__
 from .. import updater as U
+from ..i18n import tr
 from .theme import Sizes, Spacing
 from .widgets import button, label
 
@@ -51,7 +52,7 @@ class Task(QObject):
     def _run(self) -> None:
         try:
             result = self._fn(self.progress.emit, self.cancel)
-        except U.Cancelled:
+        except U.Cancelled:  # (its message is never shown)
             self.running = False
             self.failed.emit("")
         except U.UpdateError as exc:
@@ -87,14 +88,14 @@ class UpdateDialog(QDialog):
         self.problem = U.self_update_problem(self.inst, release)
         self._task: Task | None = None
         self._closing = False
-        self.setWindowTitle("Update available")
+        self.setWindowTitle(tr("Update available"))
         self.setModal(True)
         self.setMinimumSize(560, 460)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(Spacing.XL, Spacing.XL, Spacing.XL, Spacing.LG)
         lay.setSpacing(Spacing.XS)
-        lay.addWidget(label(f"{APP_NAME} {release.version} is available", "sectionTitle"))
-        lay.addWidget(label(f"You have version {__version__}.", "secondary"))
+        lay.addWidget(label(tr("StemSplitter {version} is available", version=release.version), "sectionTitle"))
+        lay.addWidget(label(tr("You have version {version}.", version=__version__), "secondary"))
         self.pages = QStackedWidget()
         self.pages.addWidget(self._offer_page())
         self.pages.addWidget(self._progress_page())
@@ -105,24 +106,24 @@ class UpdateDialog(QDialog):
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, Spacing.LG, 0, 0)
         lay.setSpacing(Spacing.SM)
-        lay.addWidget(label("What's new", "fieldLabel"))
+        lay.addWidget(label(tr("What's new"), "fieldLabel"))
         notes = QTextBrowser()
         notes.setObjectName("releaseNotes")
         notes.setOpenExternalLinks(True)
-        notes.setMarkdown(self.release.notes.strip() or "_No release notes._")
+        notes.setMarkdown(self.release.notes.strip() or "_" + tr("No release notes.") + "_")
         lay.addWidget(notes, 1)
         if self.problem:
-            info = f"{self.problem} The download page opens in your browser."
+            info = f"{self.problem} " + tr("The download page opens in your browser.")
         else:
-            info = ("Only the files that changed are downloaded. StemSplitter then closes, installs the update, "
-                    "checks it and opens again; if the check fails, the current version is kept.")
+            info = tr("Only the files that changed are downloaded. StemSplitter then closes, installs the update, "
+                      "checks it and opens again; if the check fails, the current version is kept.")
         lay.addWidget(label(info, "hint", wrap=True))
         lay.addSpacing(Spacing.SM)
         row = QHBoxLayout()
         row.setSpacing(Spacing.SM)
-        self.btn_skip = button("Skip this version", None, "ghost", Sizes.BUTTON_SMALL)
-        self.btn_later = button("Later", None, None, Sizes.BUTTON_SMALL)
-        self.btn_update = button("Open download page" if self.problem else "Update now", "download", "primary",
+        self.btn_skip = button(tr("Skip this version"), None, "ghost", Sizes.BUTTON_SMALL)
+        self.btn_later = button(tr("Later"), None, None, Sizes.BUTTON_SMALL)
+        self.btn_update = button(tr("Open download page") if self.problem else tr("Update now"), "download", "primary",
                                  Sizes.BUTTON_SMALL, "#FFFFFF")
         self.btn_update.setDefault(True)
         row.addWidget(self.btn_skip)
@@ -155,10 +156,10 @@ class UpdateDialog(QDialog):
         row = QHBoxLayout()
         row.setSpacing(Spacing.SM)
         row.addStretch(1)
-        self.btn_page = button("Open download page", None, None, Sizes.BUTTON_SMALL)
+        self.btn_page = button(tr("Open download page"), None, None, Sizes.BUTTON_SMALL)
         self.btn_page.setVisible(False)
         self.btn_page.clicked.connect(self._open_page)
-        self.btn_cancel = button("Cancel", None, None, Sizes.BUTTON_SMALL)
+        self.btn_cancel = button(tr("Cancel"), None, None, Sizes.BUTTON_SMALL)
         self.btn_cancel.clicked.connect(self.reject)
         row.addWidget(self.btn_page)
         row.addWidget(self.btn_cancel)
@@ -183,11 +184,11 @@ class UpdateDialog(QDialog):
             self.accept()
             return
         if self._busy():
-            QMessageBox.information(self, APP_NAME, "Songs are being split. Update when the queue has finished "
-                                                    "(or after cancelling it).")
+            QMessageBox.information(self, APP_NAME, tr("Songs are being split. Update when the queue has finished "
+                                                       "(or after cancelling it)."))
             return
         self.pages.setCurrentIndex(1)
-        self.status.setText("Preparing…")
+        self.status.setText(tr("Preparing…"))
         self.detail.setText("")
         inst, release = self.inst, self.release
 
@@ -207,7 +208,7 @@ class UpdateDialog(QDialog):
         if self._task is not None and self._task.running:  # stop the download first: its files stay consistent
             self._closing = True
             self._task.cancel.set()
-            self.status.setText("Cancelling…")
+            self.status.setText(tr("Cancelling…"))
             self.btn_cancel.setEnabled(False)
             return
         super().reject()
@@ -231,9 +232,9 @@ class UpdateDialog(QDialog):
             if self._closing:
                 super().reject()
                 return
-            self.status.setText("Nothing to download")
-            self.detail.setText(f"The installed files already match version {plan.version}.")
-            self.btn_cancel.setText("Close")
+            self.status.setText(tr("Nothing to download"))
+            self.detail.setText(tr("The installed files already match version {version}.", version=plan.version))
+            self.btn_cancel.setText(tr("Close"))
             return
         self.accept()
         self._quit_app()
@@ -244,14 +245,14 @@ class UpdateDialog(QDialog):
             super().reject()
             return
         self.btn_cancel.setEnabled(True)
-        self.btn_cancel.setText("Close")
+        self.btn_cancel.setText(tr("Close"))
         if not message:
-            self.status.setText("Update cancelled")
-            self.detail.setText("What was already downloaded is kept: the next try continues from there.")
+            self.status.setText(tr("Update cancelled"))
+            self.detail.setText(tr("What was already downloaded is kept: the next try continues from there."))
             return
-        self.status.setText("The update failed")
-        self.detail.setText(f"{message}\n\nYour current version is unchanged. You can try again later or download "
-                            "the new version from the release page.")
+        self.status.setText(tr("The update failed"))
+        self.detail.setText(f"{message}\n\n" + tr("Your current version is unchanged. You can try again later or "
+                                                   "download the new version from the release page."))
         self.btn_page.setVisible(True)
 
 
@@ -263,14 +264,15 @@ class InstallWindow(QWidget):
         self.work = work
         self.plan = U._read_json(work / U.PLAN)
         self._done = False
-        self.setWindowTitle(f"Updating {APP_NAME}")
+        self.setWindowTitle(tr("Updating StemSplitter"))
         self.setObjectName("root")
         self.setFixedSize(480, 170)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(Spacing.XL, Spacing.XL, Spacing.XL, Spacing.XL)
         lay.setSpacing(Spacing.SM)
-        lay.addWidget(label(f"Updating {APP_NAME} to version {self.plan.get('version', '?')}", "sectionTitle"))
-        self.status = label("Starting…", "hint", wrap=True)
+        lay.addWidget(label(tr("Updating StemSplitter to version {version}", version=self.plan.get("version", "?")),
+                            "sectionTitle"))
+        self.status = label(tr("Starting…"), "hint", wrap=True)
         lay.addWidget(self.status)
         bar = QProgressBar()
         bar.setRange(0, 0)  # busy: the steps can't be measured
@@ -304,17 +306,17 @@ class InstallWindow(QWidget):
 
     @Slot(str)
     def _on_failed(self, message: str) -> None:
-        QMessageBox.critical(self, APP_NAME, f"The update could not be installed:\n\n{message}")
+        QMessageBox.critical(self, APP_NAME, tr("The update could not be installed:") + f"\n\n{message}")
         self._finish()
 
     def _finish(self) -> None:
         self._done = True
-        self.status.setText("Starting StemSplitter…")
+        self.status.setText(tr("Starting StemSplitter…"))
         try:
             U.launch(Path(self.plan["root"]), self.plan["exe"])
         except (OSError, KeyError) as exc:
-            QMessageBox.critical(self, APP_NAME, f"StemSplitter could not be started again ({exc}). Start it "
-                                                 "yourself.")
+            QMessageBox.critical(self, APP_NAME, tr("StemSplitter could not be started again ({reason}). Start it "
+                                                    "yourself.", reason=exc))
         QApplication.quit()
 
 
