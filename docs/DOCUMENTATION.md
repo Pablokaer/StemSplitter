@@ -376,6 +376,7 @@ With memory to spare, *Maximum* still peaks about as high as before: with a rela
 | `.github/workflows/build.yml` | CI: lint, builds, self-test, artifacts and releases |
 | `ruff.toml` | Lint rules (real errors only) |
 | `CLAUDE.md` | Project rules for Claude Code: everything in English, and every relevant change documented |
+| `tools/release.py` | Starts a release: bumps `__version__`, commits, tags and pushes ([7.4](#74-publishing-a-release)); standard library only |
 | `tools/make_icon.py` | Generates the app icons in `assets/` (`icon.png`, `.ico`, `.icns`) from `assets/logo.png` (needs Pillow) |
 | `tests/test_updater.py` | Self-update tests: versions, index checks, plan, full and partial installs from a split zip, rollback, crash recovery, paths over 260 characters, range downloads over HTTP, and on Windows the installed-version sync on a scratch registry key (standard library only) |
 | `tests/test_i18n.py` | Language tests: every text passed to `tr()` / `tr_n()` / `N_()` is in every catalog and no catalog keeps unused texts, the placeholders match, plurals, and the engine still writes the progress texts the patterns expect (standard library only) |
@@ -613,9 +614,12 @@ python benchmarks/bench_engine.py loop|tail|batch    # timings, median of severa
 
 ### 7.4 Publishing a release
 
-1. Set the new version in `stemsplitter/__init__.py` (`__version__ = "1.1.0"`) and commit it.
-2. `git tag v1.1.0 && git push origin v1.1.0`. The tag must match the version, or the lint job fails before anything is built.
-3. CI builds both platforms, checks their archives and publishes the release when both pass. Edit the release notes on GitHub (before or after publishing): they are what the update dialog shows.
+From `main`, with a clean tree: `python tools/release.py 1.2.0` (or `patch`, `minor`, `major` instead of a version; add `--dry-run` to only check). The script sets `__version__` in `stemsplitter/__init__.py`, commits it as `release: version 1.2.0`, creates the tag `v1.2.0` and pushes both. It refuses to run if you are not on `main`, the tree has uncommitted changes, `main` differs from `origin/main`, the version is not newer, or the tag exists. Then:
+
+1. The tag makes CI check that it matches the version (the lint job fails before anything is built otherwise), build both platforms and check their archives.
+2. CI publishes the release when both pass. Edit the release notes on GitHub (before or after publishing): they are what the update dialog shows.
+
+The same by hand: edit `__version__`, commit, `git tag v1.2.0 && git push origin main v1.2.0`.
 
 Apps already installed see the release at their next start (or *Check for updates*) and update themselves.
 
@@ -690,3 +694,4 @@ Apps already installed see the release at their next start (or *Check for update
 | `91a9f36` | **Windows installer** (`installer/StemSplitter.iss`, Inno Setup): releases add `StemSplitter-Windows-x64-Setup.exe` (1.79 GB), which installs per user without administrator rights into `%LOCALAPPDATA%\Programs\StemSplitter` with Start menu and optional desktop shortcuts and an uninstaller that offers to remove the models and settings. CI builds it, checks its size and runs a silent install, `--selftest` and uninstall. The zip stays as the portable download and the updater's source. After a self-update, the updater writes the new version into the installer's uninstall entry. The release notes now start with which file to download |
 | `550cd0d` | Version 1.1.2 (tag `v1.1.2`): the first release with the Windows installer `StemSplitter-Windows-x64-Setup.exe` (`91a9f36`) next to the portable zip. Apps on v1.1.1 are offered it by their update check as usual |
 | — | **OctoSplitter redesign:** the app is renamed in everything the interface shows (`DISPLAY_NAME`; internal identifiers, data folders, settings keys and release file names keep `StemSplitter` so installed copies keep updating) and takes the red octopus logo (`assets/logo.png`, new app icons made from it by `tools/make_icon.py`). New dark red theme: palette, spacing and size tokens in `theme.py`, sidebar with the logo and a compact icon-only mode below 1000 px, drop area with *Drop your audio file here / or click to browse*, glowing primary buttons, a split-waveform animation in the processing card. New *Extracted Stems* card with a player for the original and a DAW-style channel per stem (waveform, play, mute, solo, volume, menu) that plays through `QtMultimedia` with one shared playhead (`stemsplitter/ui/audio.py`, `stemsplitter/ui/stems.py`). Window opens at 1180×760 (minimum 900×640, was 1100×700). Separation, worker protocol, queue, settings keys and output files unchanged. Not measured: idle memory, packaged size, playback in a packaged build ([8](#8-known-limitations)); 24 new texts translated in every catalog (no native review), 2 removed, the name changed in the existing ones (`tests/test_i18n.py` passes) |
+| — | `tools/release.py`: one command bumps the version, commits, tags and pushes a release (checked on a branch other than `main`, where it refuses; a real release was not run). No change to the app or to CI |
