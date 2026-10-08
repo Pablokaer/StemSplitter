@@ -1,4 +1,6 @@
-# StemSplitter
+# OctoSplitter
+
+> OctoSplitter was called StemSplitter until this version. Only the name shown in the app and its look changed: the download file names (`StemSplitter-…`), the install folder and the settings keep the old name, so existing installs update normally.
 
 > Full technical documentation: features, quality measurements, performance and optimizations, architecture, build and CI. See [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md).
 
@@ -22,7 +24,7 @@ You tick which of these to write, from a single one (for example only **No Drums
 * **Uses your GPU automatically**: NVIDIA (CUDA) on Windows, the Metal GPU on Apple Silicon. It falls back to the CPU only when there is no GPU.
 * **Batch processing**: drop files or whole folders. Each song shows its own status, a broken file doesn't stop the batch, and the next song is separated while the previous one is written to disk.
 * **Output**: MP3 at 320, 256 or 192 kbps, or 24-bit WAV, in one subfolder per song. The stems add back up to the original song exactly.
-* **Easy to use**: a dark, modern window with a drop area, a queue that shows each song's state and time left, a processing card with the progress and a *Cancel* button, and a status bar with the device in use. There is a log with the time of every step, and your settings are remembered. The models download themselves on first use, with progress shown.
+* **Easy to use**: a near-black window with a red accent, the OctoSplitter octopus, a drop area (click it or drop files on it), a queue that shows each song's state and time left, a processing card with the progress and a *Cancel* button, and a status bar with the device in use. When songs are split, the *Extracted Stems* card lets you play the original and each stem on its own channel, with waveform, mute, solo and volume. There is a log with the time of every step, and your settings are remembered. The models download themselves on first use, with progress shown.
 * **Updates itself**: when a new version is published it shows what changed and asks. *Update now* downloads only the files that changed, installs them, checks the new version and restarts; if the check fails, your current version is kept. You can also check by hand on the Settings page.
 * **In your language**: English, Português (Brasil), Español, 中文（简体） or हिन्दी. It follows your system's language and can be changed on the Settings page (the app restarts to switch). The log and the command line stay in English.
 * **Command line** for scripting and batches (`--cli`), and a self-test (`--selftest`) used by CI.
@@ -97,7 +99,7 @@ When you add several songs, the next one is already being separated while the pr
 
 **Tips for speed**
 * Almost all of the time is the AI model itself, so the preset is the real speed knob.
-* On GPUs with little memory (4 GB), close other apps that use the GPU (games, video editors, a second copy of StemSplitter). When the GPU runs out of memory Windows borrows system RAM and the split can get several times slower.
+* On GPUs with little memory (4 GB), close other apps that use the GPU (games, video editors, a second copy of OctoSplitter). When the GPU runs out of memory Windows borrows system RAM and the split can get several times slower.
 * The app shows which device it is using in the status bar at the bottom of the window, and the log lists how long each step took.
 * `STEMSPLITTER_THREADS` (environment variable) pins the CPU thread count. On the test laptop the default was already the fastest, so only try it if CPU-only runs look slow.
 
@@ -108,9 +110,9 @@ You can close the window and it asks before stopping a job that is still running
 
 ## Updates
 
-When a new version is published on GitHub, StemSplitter tells you when it starts (untick *Check for updates when the app starts* on the Settings page to turn this off, and use *Check for updates* there whenever you like). The pop-up shows what's new and offers *Update now*, *Later* or *Skip this version*.
+When a new version is published on GitHub, OctoSplitter tells you when it starts (untick *Check for updates when the app starts* on the Settings page to turn this off, and use *Check for updates* there whenever you like). The pop-up shows what's new and offers *Update now*, *Later* or *Skip this version*.
 
-*Update now* downloads only the files that changed. StemSplitter then closes, a small window installs the update and checks the new version, and the app opens again. If anything fails, your current version is kept and the app tells you why. For this to work, the app's folder and the folder containing it must be writable. The installer already puts it in such a folder; with the portable zip, keep the app in a folder of your own (Downloads, Desktop, Documents…), not in `C:\Program Files`. While it updates, it uses a `.ss-update` folder next to the app and removes it afterwards.
+*Update now* downloads only the files that changed. OctoSplitter then closes, a small window installs the update and checks the new version, and the app opens again. If anything fails, your current version is kept and the app tells you why. For this to work, the app's folder and the folder containing it must be writable. The installer already puts it in such a folder; with the portable zip, keep the app in a folder of your own (Downloads, Desktop, Documents…), not in `C:\Program Files`. While it updates, it uses a `.ss-update` folder next to the app and removes it afterwards.
 
 Copies running from source, local builds and the CPU-only Windows build can't update themselves; for those the pop-up opens the download page.
 

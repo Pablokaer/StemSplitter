@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import APP_NAME, __version__
+from .. import APP_NAME, DISPLAY_NAME, __version__
 from .. import updater as U
 from ..i18n import tr
 from .theme import Sizes, Spacing
@@ -94,7 +94,7 @@ class UpdateDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(Spacing.XL, Spacing.XL, Spacing.XL, Spacing.LG)
         lay.setSpacing(Spacing.XS)
-        lay.addWidget(label(tr("StemSplitter {version} is available", version=release.version), "sectionTitle"))
+        lay.addWidget(label(tr("OctoSplitter {version} is available", version=release.version), "sectionTitle"))
         lay.addWidget(label(tr("You have version {version}.", version=__version__), "secondary"))
         self.pages = QStackedWidget()
         self.pages.addWidget(self._offer_page())
@@ -115,7 +115,7 @@ class UpdateDialog(QDialog):
         if self.problem:
             info = f"{self.problem} " + tr("The download page opens in your browser.")
         else:
-            info = tr("Only the files that changed are downloaded. StemSplitter then closes, installs the update, "
+            info = tr("Only the files that changed are downloaded. OctoSplitter then closes, installs the update, "
                       "checks it and opens again; if the check fails, the current version is kept.")
         lay.addWidget(label(info, "hint", wrap=True))
         lay.addSpacing(Spacing.SM)
@@ -184,7 +184,7 @@ class UpdateDialog(QDialog):
             self.accept()
             return
         if self._busy():
-            QMessageBox.information(self, APP_NAME, tr("Songs are being split. Update when the queue has finished "
+            QMessageBox.information(self, DISPLAY_NAME, tr("Songs are being split. Update when the queue has finished "
                                                        "(or after cancelling it)."))
             return
         self.pages.setCurrentIndex(1)
@@ -264,13 +264,13 @@ class InstallWindow(QWidget):
         self.work = work
         self.plan = U._read_json(work / U.PLAN)
         self._done = False
-        self.setWindowTitle(tr("Updating StemSplitter"))
+        self.setWindowTitle(tr("Updating OctoSplitter"))
         self.setObjectName("root")
         self.setFixedSize(480, 170)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(Spacing.XL, Spacing.XL, Spacing.XL, Spacing.XL)
         lay.setSpacing(Spacing.SM)
-        lay.addWidget(label(tr("Updating StemSplitter to version {version}", version=self.plan.get("version", "?")),
+        lay.addWidget(label(tr("Updating OctoSplitter to version {version}", version=self.plan.get("version", "?")),
                             "sectionTitle"))
         self.status = label(tr("Starting…"), "hint", wrap=True)
         lay.addWidget(self.status)
@@ -306,16 +306,16 @@ class InstallWindow(QWidget):
 
     @Slot(str)
     def _on_failed(self, message: str) -> None:
-        QMessageBox.critical(self, APP_NAME, tr("The update could not be installed:") + f"\n\n{message}")
+        QMessageBox.critical(self, DISPLAY_NAME, tr("The update could not be installed:") + f"\n\n{message}")
         self._finish()
 
     def _finish(self) -> None:
         self._done = True
-        self.status.setText(tr("Starting StemSplitter…"))
+        self.status.setText(tr("Starting OctoSplitter…"))
         try:
             U.launch(Path(self.plan["root"]), self.plan["exe"])
         except (OSError, KeyError) as exc:
-            QMessageBox.critical(self, APP_NAME, tr("StemSplitter could not be started again ({reason}). Start it "
+            QMessageBox.critical(self, DISPLAY_NAME, tr("OctoSplitter could not be started again ({reason}). Start it "
                                                     "yourself.", reason=exc))
         QApplication.quit()
 

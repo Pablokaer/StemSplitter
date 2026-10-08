@@ -99,8 +99,6 @@ MESSAGES = {
         "Descargando el {model} (solo la primera vez): {mb} MB",
     "Downloading {size}…":
         "Descargando {size}…",
-    "Drag & drop audio files here":
-        "Arrastra y suelta archivos de audio aquí",
     "Drum kit and percussion":
         "Batería y percusión",
     "Drums":
@@ -187,8 +185,8 @@ MESSAGES = {
         "Un archivo por pista, en una subcarpeta para cada canción.",
     "One queue, one model load":
         "Una cola, una carga de modelo",
-    "Only the files that changed are downloaded. StemSplitter then closes, installs the update, checks it and opens again; if the check fails, the current version is kept.":
-        "Solo se descargan los archivos que cambiaron. Después StemSplitter se cierra, instala la actualización, la comprueba y se vuelve a abrir; si la comprobación falla, se conserva la versión actual.",
+    "Only the files that changed are downloaded. OctoSplitter then closes, installs the update, checks it and opens again; if the check fails, the current version is kept.":
+        "Solo se descargan los archivos que cambiaron. Después OctoSplitter se cierra, instala la actualización, la comprueba y se vuelve a abrir; si la comprobación falla, se conserva la versión actual.",
     "Open download page":
         "Abrir página de descarga",
     "Open output folder":
@@ -231,8 +229,8 @@ MESSAGES = {
         "Quitar de la lista",
     "Remove selected":
         "Quitar seleccionados",
-    "Restart StemSplitter now to use the new language?":
-        "¿Reiniciar StemSplitter ahora para usar el nuevo idioma?",
+    "Restart OctoSplitter now to use the new language?":
+        "¿Reiniciar OctoSplitter ahora para usar el nuevo idioma?",
     "Restoring the previous version…":
         "Restaurando la versión anterior…",
     "Save stems to":
@@ -269,32 +267,30 @@ MESSAGES = {
         "Separada de Otros",
     "Splits all the stems in one pass.":
         "Separa todas las pistas de una vez.",
-    "Starting StemSplitter…":
-        "Iniciando StemSplitter…",
+    "Starting OctoSplitter…":
+        "Iniciando OctoSplitter…",
     "Starting engine (loading PyTorch)...":
         "Iniciando el motor (cargando PyTorch)...",
     "Starting…":
         "Iniciando…",
-    "StemSplitter can't write to the folder it is installed in ({folder}).":
-        "StemSplitter no puede escribir en la carpeta donde está instalado ({folder}).",
-    "StemSplitter could not be started again ({reason}). Start it yourself.":
-        "No se pudo volver a iniciar StemSplitter ({reason}). Inícialo tú mismo.",
-    "StemSplitter didn't close, so nothing was changed.":
-        "StemSplitter no se cerró, así que no se cambió nada.",
-    "StemSplitter is running from source code here: update it with git pull.":
-        "StemSplitter se está ejecutando desde el código fuente: actualízalo con git pull.",
-    "StemSplitter never uses this much of the free memory, so the computer stays responsive. When memory runs short it slows down or waits, and never loses work. Automatic keeps 2 GB free, or a quarter of the RAM on machines with less than 8 GB.":
-        "StemSplitter nunca usa esta parte de la memoria libre, para que el ordenador siga respondiendo. Cuando falta memoria, va más despacio o espera, y nunca pierde trabajo. Automático deja 2 GB libres, o una cuarta parte de la RAM en equipos con menos de 8 GB.",
-    "StemSplitter restarts to show the new language.":
-        "StemSplitter se reinicia para mostrar el nuevo idioma.",
-    "StemSplitter was updated to version {version}.":
-        "StemSplitter se actualizó a la versión {version}.",
-    "StemSplitter {version} is available":
-        "StemSplitter {version} está disponible",
+    "OctoSplitter can't write to the folder it is installed in ({folder}).":
+        "OctoSplitter no puede escribir en la carpeta donde está instalado ({folder}).",
+    "OctoSplitter could not be started again ({reason}). Start it yourself.":
+        "No se pudo volver a iniciar OctoSplitter ({reason}). Inícialo tú mismo.",
+    "OctoSplitter didn't close, so nothing was changed.":
+        "OctoSplitter no se cerró, así que no se cambió nada.",
+    "OctoSplitter is running from source code here: update it with git pull.":
+        "OctoSplitter se está ejecutando desde el código fuente: actualízalo con git pull.",
+    "OctoSplitter never uses this much of the free memory, so the computer stays responsive. When memory runs short it slows down or waits, and never loses work. Automatic keeps 2 GB free, or a quarter of the RAM on machines with less than 8 GB.":
+        "OctoSplitter nunca usa esta parte de la memoria libre, para que el ordenador siga respondiendo. Cuando falta memoria, va más despacio o espera, y nunca pierde trabajo. Automático deja 2 GB libres, o una cuarta parte de la RAM en equipos con menos de 8 GB.",
+    "OctoSplitter restarts to show the new language.":
+        "OctoSplitter se reinicia para mostrar el nuevo idioma.",
+    "OctoSplitter was updated to version {version}.":
+        "OctoSplitter se actualizó a la versión {version}.",
+    "OctoSplitter {version} is available":
+        "OctoSplitter {version} está disponible",
     "Stems to extract":
         "Pistas para extraer",
-    "Supports MP3, WAV, FLAC, M4A and more. Folders are scanned too.":
-        "Admite MP3, WAV, FLAC, M4A y más. También se examinan las carpetas.",
     "System default":
         "Predeterminado del sistema",
     "The app's files could not be replaced ({reason}), so the previous version was kept.":
@@ -309,8 +305,8 @@ MESSAGES = {
         "El servidor de descarga no admite descargas parciales.",
     "The installed files already match version {version}.":
         "Los archivos instalados ya coinciden con la versión {version}.",
-    "The new language is used the next time StemSplitter starts.":
-        "El nuevo idioma se usará la próxima vez que se inicie StemSplitter.",
+    "The new language is used the next time OctoSplitter starts.":
+        "El nuevo idioma se usará la próxima vez que se inicie OctoSplitter.",
     "The new version didn't start ({reason}).":
         "La nueva versión no se inició ({reason}).",
     "The new version failed its self-test, so the previous version was kept.":
@@ -357,10 +353,10 @@ MESSAGES = {
         "Actualizar ahora",
     "Updates":
         "Actualizaciones",
-    "Updating StemSplitter":
-        "Actualizando StemSplitter",
-    "Updating StemSplitter to version {version}":
-        "Actualizando StemSplitter a la versión {version}",
+    "Updating OctoSplitter":
+        "Actualizando OctoSplitter",
+    "Updating OctoSplitter to version {version}":
+        "Actualizando OctoSplitter a la versión {version}",
     "Uses all the memory it wants and never waits for free memory: the fastest option, but the computer can slow down or swap, and the system may end the app if it runs out of memory (the split then resumes from its checkpoint). Use it only when nothing else important is running.":
         "Usa toda la memoria que quiera y nunca espera memoria libre: la opción más rápida, pero el ordenador puede ir lento o usar intercambio, y el sistema puede cerrar la app si se queda sin memoria (la separación sigue desde su punto de control). Úsalo solo cuando no haya nada importante en marcha.",
     "Version {version}":
@@ -373,16 +369,16 @@ MESSAGES = {
         "Voz",
     "WAV · 24-bit (lossless)":
         "WAV · 24 bits (sin pérdidas)",
-    "Waiting for StemSplitter to close…":
-        "Esperando a que StemSplitter se cierre…",
+    "Waiting for OctoSplitter to close…":
+        "Esperando a que OctoSplitter se cierre…",
     "Waiting for free memory ({mb} MB more needed)...":
         "Esperando memoria libre (faltan {mb} MB)...",
     "What was already downloaded is kept: the next try continues from there.":
         "Lo ya descargado se conserva: el próximo intento continúa desde ahí.",
     "What's new":
         "Novedades",
-    "When a new version is published, StemSplitter shows what changed and asks before updating. It then downloads only the files that changed and restarts.":
-        "Cuando se publica una nueva versión, StemSplitter muestra los cambios y pregunta antes de actualizar. Después descarga solo los archivos que cambiaron y se reinicia.",
+    "When a new version is published, OctoSplitter shows what changed and asks before updating. It then downloads only the files that changed and restarts.":
+        "Cuando se publica una nueva versión, OctoSplitter muestra los cambios y pregunta antes de actualizar. Después descarga solo los archivos que cambiaron y se reinicia.",
     "Working with many songs":
         "Trabajar con muchas canciones",
     "Writing files...":
@@ -437,4 +433,52 @@ MESSAGES = {
         "{s} s",
     "{time} remaining":
         "quedan {time}",
+    "Can't play this file here":
+        "No se puede reproducir este archivo aquí",
+    "Copy file path":
+        "Copiar ruta del archivo",
+    "Drop your audio file here":
+        "Suelta tu archivo de audio aquí",
+    "Extracted Stems":
+        "Stems extraídos",
+    "Instrumental":
+        "Instrumental",
+    "Loading stems…":
+        "Cargando los stems…",
+    "More":
+        "Más",
+    "Mute":
+        "Silenciar",
+    "No Drums":
+        "Sin batería",
+    "No audio output device was found.":
+        "No se encontró ninguna salida de audio.",
+    "Open folder":
+        "Abrir carpeta",
+    "Other":
+        "Otros",
+    "Pause":
+        "Pausar",
+    "Piano":
+        "Piano",
+    "Play":
+        "Reproducir",
+    "Play stems":
+        "Reproducir stems",
+    "Show in folder":
+        "Mostrar en la carpeta",
+    "Solo":
+        "Solo",
+    "Split a song, then play, solo or mute each stem.":
+        "Separa una canción y luego reproduce, pon en solo o silencia cada stem.",
+    "These files can't be played here.":
+        "Estos archivos no se pueden reproducir aquí.",
+    "Volume":
+        "Volumen",
+    "Your stems will show up here":
+        "Tus stems aparecerán aquí",
+    "or click to browse":
+        "o haz clic para buscar",
+    "{formats} · folders are scanned too":
+        "{formats} · también se analizan las carpetas",
 }
