@@ -2,6 +2,10 @@
 
 > OctoSplitter was called StemSplitter until this version. Only the name shown in the app and its look changed: the download file names (`StemSplitter-…`), the install folder and the settings keep the old name, so existing installs update normally.
 
+![OctoSplitter: drop a song, get its stems](docs/images/interface.png)
+
+> *The picture above is a design illustration, not a screenshot. The real screens are in the next section.*
+
 > Full technical documentation: features, quality measurements, performance and optimizations, architecture, build and CI. See [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md).
 
 A desktop app for **Windows and macOS** that takes a song (MP3, WAV, FLAC, M4A, AAC, OGG, Opus, AIFF, WMA) and splits it into one file per stem:
@@ -17,6 +21,28 @@ A desktop app for **Windows and macOS** that takes a song (MP3, WAV, FLAC, M4A, 
 | **No Drums** | The whole song with only the drums removed |
 
 You tick which of these to write, from a single one (for example only **No Drums**, to play drums along) up to all eight. The default is Vocals, Drums, Bass and Other.
+
+## Screenshots: before and after splitting a song
+
+These are real screenshots of OctoSplitter 1.2.0, taken while splitting a 30-second clip of an MP3 with the *Fast* preset and the default stems (Vocals, Drums, Bass, Other).
+
+**1. Before: nothing added yet.** The **Split** page opens with the drop area, an empty queue and the *Output Settings* below. Drop songs or folders on it, or click **Add Files** / **Add Folder**.
+
+![The Split page when the app opens: drop area, empty queue](docs/images/screen-1-empty.png)
+
+**2. Before: the song is in the queue.** The song is listed as *Queued*. The bottom card says *Ready to split* and summarizes what will be written ("1 song to split · 4 files per song · Fast · MP3 · 320 kbps"). Click **Split Stems**.
+
+![A song queued, ready to be split](docs/images/screen-2-before.png)
+
+**3. During: splitting.** The song shows its progress and the time left, the bottom card has a **Cancel** button, and the status bar shows the device in use and the memory.
+
+![The song being split, with the progress and the Cancel button](docs/images/screen-3-processing.png)
+
+**4. After: the stems are ready.** The song is marked *Completed* with the time it took, and the **Extracted Stems** card shows the original and one channel per stem, each with its waveform, play, **M** (mute), **S** (solo) and volume. **Play stems** plays them together, and **Open output folder** shows the files, one subfolder per song.
+
+![The finished song: Extracted Stems with Vocals, Drums, Bass and Other](docs/images/screen-4-after.png)
+
+> These screenshots were taken on a Windows 11 PC **without using the GPU** (CPU only, 12 threads, which is why the status bar says "no GPU found - this will be slow"). The 30-second clip took 2 min 07 s in that run. That is a single run on a PC that was short on free memory, not a benchmark: see [How long does it take?](#how-long-does-it-take-4-minute-song) for the measured timings. With an NVIDIA GPU it is much faster.
 
 ## Features
 
@@ -76,6 +102,8 @@ The apps are built for you by GitHub Actions (free), because a Windows build has
 1. Drag songs (or a whole folder) onto the drop area, or click **Add Files** or **Add Folder**.
 2. In **Output Settings**, choose where to save, the quality, the format, and under **Stems to extract** tick the stems you want: Vocals, Drums, Bass, Other (melody), Guitar, Piano (keys), Instrumental (no vocals) and No Drums (the song without drums). Each song gets its own subfolder with one file per ticked stem: `Song - Vocals.mp3`, `Song - Drums.mp3`, `Song - Bass.mp3`, `Song - Other.mp3`, …
 3. Click **Split Stems**. The processing card at the bottom shows the song being split, its progress and the time left, with a **Cancel** button. If some songs fail, click **Split Stems** again to retry only those.
+
+The sidebar has four pages: **Split** (everything above), **Batch** (how the queue handles many songs, with a shortcut to add a folder), **Settings** and **About**.
 
 *Show log* and *Open output folder* are next to the Split Stems button. The language, the memory reserve (*Keep free for the system*) and *Ignore the memory limit* are on the **Settings** page; **About** has the version and the models.
 
