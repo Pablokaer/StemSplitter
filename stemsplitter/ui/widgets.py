@@ -6,14 +6,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import (QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, Signal)
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+import math
+
+from PySide6.QtCore import (QEasingCurve, QEvent, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QTimer,
+                            QVariantAnimation, Signal)
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QRadialGradient
 from PySide6.QtWidgets import (
     QBoxLayout,
     QButtonGroup,
     QCheckBox,
     QComboBox,
     QFrame,
+    QGraphicsDropShadowEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -31,9 +35,16 @@ from PySide6.QtWidgets import (
 
 from ..i18n import N_, tr, tr_n
 from .icons import icon, logo, pixmap
-from .theme import Colors, Sizes, Spacing
+from .theme import Colors, Radii, Sizes, Spacing
 
 SUPPORTED = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".aiff", ".aif", ".wma"}
+
+
+def supported_formats() -> str:
+    """"MP3, WAV, FLAC..." taken from SUPPORTED (.aif and .aiff are one format, listed once)."""
+    names = {e.lstrip(".").upper() for e in SUPPORTED} - {"AIF"}
+    first = ["MP3", "WAV", "FLAC", "M4A"]
+    return ", ".join(first + sorted(names - set(first)))
 
 
 def scan_paths(paths) -> list[Path]:
@@ -67,9 +78,27 @@ def centered_label(text: str, name: str) -> QLabel:
     return w
 
 
+class GlowButton(QPushButton):
+    """A primary button: it carries a soft red glow while it is enabled."""
+
+    def __init__(self, text: str):
+        super().__init__(text)
+        self._glow = QGraphicsDropShadowEffect(self)
+        self._glow.setBlurRadius(28)
+        self._glow.setOffset(0, 2)
+        self._glow.setColor(QColor(255, 24, 56, 90))
+        self.setGraphicsEffect(self._glow)
+
+    def changeEvent(self, e):
+        if e.type() == QEvent.EnabledChange:
+            self._glow.setEnabled(self.isEnabled())
+        super().changeEvent(e)
+
+
 def button(text: str, icon_name: str | None = None, variant: str | None = None, height: int = Sizes.BUTTON,
            icon_color: str = Colors.TEXT) -> QPushButton:
-    b = QPushButton(f" {text}" if icon_name and text else text)  # a little air between icon and text
+    caption = f" {text}" if icon_name and text else text
+    b = GlowButton(caption) if variant == "primary" else QPushButton(caption)  # a little air between icon and text
     if variant:
         b.setProperty("variant", variant)
     if icon_name:
@@ -101,6 +130,30 @@ def icon_label(icon_name: str, color: str, size: int = 18) -> QLabel:
     w.setPixmap(pixmap(icon_name, color, size))
     w.setFixedSize(size, size)
     return w
+
+
+class Watermark(QWidget):
+    """The logo drawn faintly, for empty states."""
+
+    def __init__(self, size: int = 64, opacity: float = 0.3):
+        super().__init__()
+        self._pm = logo(size, opacity)
+        self.setFixedSize(size, size)
+
+    def paintEvent(self, event):
+        QPainter(self).drawPixmap(0, 0, self._pm)
+
+
+class Backdrop(QWidget):
+    """The window's background: near-black with a faint red glow in the top-right corner."""
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(Colors.BACKGROUND))
+        glow = QRadialGradient(QPointF(self.width() * 0.92, -self.height() * 0.1), max(self.width(), self.height()) * 0.75)
+        glow.setColorAt(0.0, QColor(255, 24, 56, 38))
+        glow.setColorAt(0.65, QColor(255, 24, 56, 0))
+        p.fillRect(self.rect(), glow)
 
 
 def repolish(w: QWidget) -> None:
@@ -163,48 +216,82 @@ class Sidebar(QFrame):
         super().__init__()
         self.setObjectName("sidebar")
         self.setFixedWidth(Sizes.SIDEBAR)
+        self._compact = False
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(Spacing.LG, Spacing.XL + 4, Spacing.LG, Spacing.XL)
+        lay.setContentsMargins(Spacing.LG, Spacing.XL, Spacing.LG, Spacing.XL)
         lay.setSpacing(0)
 
-        brand = QHBoxLayout()
-        brand.setContentsMargins(Spacing.SM, 0, 0, 0)
-        brand.setSpacing(Spacing.MD)
-        mark = QLabel()
-        mark.setPixmap(logo(44))
-        mark.setFixedSize(44, 44)
-        brand.addWidget(mark)
+        self.brand = QHBoxLayout()
+        self.brand.setContentsMargins(Spacing.XS, 0, 0, 0)
+        self.brand.setSpacing(Spacing.MD)
+        self.mark = QLabel()
+        self.mark.setPixmap(logo(44))
+        self.mark.setFixedSize(44, 44)
+        self.brand.addWidget(self.mark)
         titles = QVBoxLayout()
+        titles.setContentsMargins(0, 0, 0, 0)
         titles.setSpacing(0)
-        titles.addWidget(label("StemSplitter", "appTitle"))
-        titles.addWidget(label(tr("Split any song into stems"), "appTagline", wrap=True))  # long in some languages
-        brand.addLayout(titles, 1)
-        lay.addLayout(brand)
-        lay.addSpacing(Spacing.XXL + 4)
+        self.title = label(f'<span style="color:{Colors.PRIMARY}">Octo</span>Splitter', "appTitle")
+        self.title.setTextFormat(Qt.RichText)
+        self.tagline = label(tr("Split any song into stems"), "appTagline", wrap=True)  # long in some languages
+        titles.addWidget(self.title)
+        titles.addWidget(self.tagline)
+        self.titles = QWidget()
+        self.titles.setLayout(titles)
+        self.brand.addWidget(self.titles, 1)
+        lay.addLayout(self.brand)
+        lay.addSpacing(Spacing.XXL)
 
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
+        self._texts: list[str] = []
         for i, (text, icon_name) in enumerate(self.PAGES):
             b = QPushButton(f"  {tr(text)}")
             b.setObjectName("navButton")
             b.setCheckable(True)
             b.setFixedHeight(Sizes.BUTTON)
             b.setCursor(Qt.PointingHandCursor)
-            b.setIcon(icon(icon_name, Colors.TEXT_MUTED, 20, checked_color=Colors.PURPLE_PALE))
+            b.setIcon(icon(icon_name, Colors.TEXT_MUTED, 20, checked_color=Colors.PRIMARY_LIGHT))
             b.setIconSize(QSize(20, 20))
+            self._texts.append(f"  {tr(text)}")
             self.group.addButton(b, i)
             lay.addWidget(b)
             lay.addSpacing(Spacing.XS)
         self.group.button(0).setChecked(True)
         self.group.idClicked.connect(self.page_changed)
         lay.addStretch(1)
-        footer = label(tr("Version {version}", version=version), "sidebarFooter")
-        footer.setContentsMargins(Spacing.SM, 0, 0, 0)
-        lay.addWidget(footer)
+        self.footer = label(tr("Version {version}", version=version), "sidebarFooter")
+        self.footer.setContentsMargins(Spacing.SM, 0, 0, 0)
+        lay.addWidget(self.footer)
 
     def select(self, index: int) -> None:
         self.group.button(index).setChecked(True)
         self.page_changed.emit(index)
+
+    def set_compact(self, compact: bool) -> None:
+        """Icons only: for narrow windows."""
+        if compact == self._compact:
+            return
+        self._compact = compact
+        self.setFixedWidth(Sizes.SIDEBAR_COMPACT if compact else Sizes.SIDEBAR)
+        self.titles.setVisible(not compact)
+        self.footer.setVisible(not compact)
+        side = Spacing.MD if compact else Spacing.LG
+        self.layout().setContentsMargins(side, Spacing.XL, side, Spacing.XL)
+        self.brand.setContentsMargins(Spacing.SM if compact else Spacing.XS, 0, 0, 0)
+        for i, b in enumerate(self.group.buttons()):
+            b.setText("" if compact else self._texts[i])
+            b.setToolTip(self._texts[i].strip() if compact else "")
+            b.setProperty("compact", compact)
+            repolish(b)
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._compact:
+            return
+        p = QPainter(self)  # the octopus, almost invisible, rising from the bottom edge
+        p.drawPixmap(self.width() - 200, self.height() - 190, logo(260, 0.07))
 
 
 # -- page header ------------------------------------------------------------------------
@@ -220,58 +307,84 @@ def page_header(title: str, subtitle: str) -> QWidget:
 
 # -- drop zone --------------------------------------------------------------------------
 class DropZone(QFrame):
-    """The big drag & drop target with the Add Files / Add Folder buttons."""
+    """The big drag & drop target (click anywhere to browse) with the Add Files / Add Folder buttons."""
 
     files_dropped = Signal(list)
+    browse_requested = Signal()
+
+    HOVER_GLOW = 0.35  # how lit the zone is under the mouse; a dragged file lights it fully
 
     def __init__(self):
         super().__init__()
         self.setObjectName("dropZone")
         self.setAcceptDrops(True)
+        self.setCursor(Qt.PointingHandCursor)
         self.setMinimumHeight(Sizes.DROP_ZONE)
-        self._hover = False
+        self._glow = 0.0
+        self._fade = QVariantAnimation(self)
+        self._fade.setDuration(180)
+        self._fade.valueChanged.connect(self._set_glow)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(Spacing.XL, Spacing.XL, Spacing.XL, Spacing.XL)
+        lay.setContentsMargins(Spacing.XL, Spacing.LG, Spacing.XL, Spacing.LG)
         lay.setSpacing(0)
         lay.addStretch(1)
-        self.icon = icon_label("upload", Colors.PURPLE_LIGHT, 40)
+        self.icon = icon_label("upload", Colors.PRIMARY, 44)
         lay.addWidget(self.icon, 0, Qt.AlignHCenter)
+        lay.addSpacing(Spacing.SM)
+        lay.addWidget(centered_label(tr("Drop your audio file here"), "dropTitle"))
+        lay.addWidget(centered_label(tr("or click to browse"), "dropHint"))
+        lay.addSpacing(Spacing.SM)
+        chip = label(tr("{formats} · folders are scanned too", formats=supported_formats()), "formatChip")
+        chip.setAlignment(Qt.AlignHCenter)
+        lay.addWidget(chip, 0, Qt.AlignHCenter)
         lay.addSpacing(Spacing.MD)
-        lay.addWidget(centered_label(tr("Drag & drop audio files here"), "dropTitle"))
-        lay.addSpacing(Spacing.XS)
-        lay.addWidget(centered_label(tr("Supports MP3, WAV, FLAC, M4A and more. Folders are scanned too."), "hint"))
-        lay.addSpacing(Spacing.LG + 4)
         row = QHBoxLayout()
         row.setSpacing(Spacing.MD)
         row.addStretch(1)
-        self.btn_add = button(tr("Add Files"), "file", "primary", Sizes.BUTTON_PRIMARY, icon_color="#FFFFFF")
-        self.btn_add.setMinimumWidth(200)
-        self.btn_folder = button(tr("Add Folder"), "folder", None, Sizes.BUTTON_PRIMARY)
-        self.btn_folder.setMinimumWidth(160)
+        self.btn_add = button(tr("Add Files"), "file", "primary", Sizes.BUTTON, icon_color="#FFFFFF")
+        self.btn_add.setMinimumWidth(176)
+        self.btn_folder = button(tr("Add Folder"), "folder", None, Sizes.BUTTON)
+        self.btn_folder.setMinimumWidth(152)
         row.addWidget(self.btn_add)
         row.addWidget(self.btn_folder)
         row.addStretch(1)
         lay.addLayout(row)
         lay.addStretch(1)
 
-    def _set_hover(self, on: bool) -> None:
-        self._hover = on
+    def _set_glow(self, value) -> None:
+        self._glow = float(value)
         self.update()
+
+    def _glow_to(self, target: float) -> None:
+        self._fade.stop()
+        self._fade.setStartValue(self._glow)
+        self._fade.setEndValue(target)
+        self._fade.start()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.browse_requested.emit()
+
+    def enterEvent(self, e):
+        self._glow_to(self.HOVER_GLOW)
+
+    def leaveEvent(self, e):
+        self._glow_to(0.0)
 
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
             e.acceptProposedAction()
-            self._set_hover(True)
+            self._glow_to(1.0)
 
     def dragMoveEvent(self, e):
         if e.mimeData().hasUrls():
             e.acceptProposedAction()
 
     def dragLeaveEvent(self, e):
-        self._set_hover(False)
+        self._glow_to(0.0)
 
     def dropEvent(self, e):
-        self._set_hover(False)
+        self._glow_to(0.0)
         paths = _dropped_paths(e)
         if paths:
             self.files_dropped.emit(paths)
@@ -282,12 +395,34 @@ class DropZone(QFrame):
         p.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         path = QPainterPath()
-        path.addRoundedRect(rect, 16, 16)
-        p.fillPath(path, QColor("#16143A" if self._hover else Colors.BG_2))
-        pen = QPen(QColor(Colors.PURPLE_PALE if self._hover else "#5A46C8"), 1.6 if self._hover else 1.3)
+        path.addRoundedRect(rect, Radii.DROP, Radii.DROP)
+        p.fillPath(path, QColor(Colors.SURFACE))
+        glow = QRadialGradient(rect.center(), rect.width() * 0.5)
+        glow.setColorAt(0.0, QColor(255, 24, 56, round(20 + 55 * self._glow)))
+        glow.setColorAt(1.0, QColor(255, 24, 56, 0))
+        p.fillPath(path, glow)
+        self._paint_bars(p, rect)
+        pen = QPen(QColor(255, 24, 56, round(90 + 150 * self._glow)), 1.3 + 0.5 * self._glow)
         pen.setDashPattern([5, 4])
         p.setPen(pen)
         p.drawPath(path)
+
+    def _paint_bars(self, p: QPainter, rect: QRectF) -> None:
+        """Equalizer bars rising towards the middle from both sides, fading out: the drop zone's sound."""
+        if rect.width() < 720:
+            return
+        heights = [0.22, 0.34, 0.5, 0.42, 0.66, 0.54, 0.78, 0.6, 0.9, 0.7]
+        p.setPen(Qt.NoPen)
+        step, bar = 14, 6
+        for side in (-1, 1):
+            for i, h in enumerate(heights):
+                x = rect.center().x() + side * (rect.width() * 0.46 - i * step) - bar / 2
+                if abs(x - rect.center().x()) < 270:
+                    continue
+                alpha = round((0.10 + 0.20 * (i / len(heights))) * 255 * (1 + 0.6 * self._glow))
+                p.setBrush(QColor(255, 24, 56, min(255, alpha)))
+                hh = h * rect.height() * 0.42
+                p.drawRoundedRect(QRectF(x, rect.center().y() - hh / 2, bar, hh), 3, 3)
 
 
 # -- file queue -------------------------------------------------------------------------
@@ -312,20 +447,20 @@ class StatusIcon(QWidget):
         if self.kind == "running":
             p.setPen(QPen(QColor(Colors.TRACK), 3))
             p.drawEllipse(r)
-            pen = QPen(QColor(Colors.PURPLE_LIGHT), 3)
+            pen = QPen(QColor(Colors.PRIMARY_LIGHT), 3)
             pen.setCapStyle(Qt.RoundCap)
             p.setPen(pen)
             p.drawArc(r, 90 * 16, -int(360 * 16 * max(0.02, min(1.0, self.fraction))))
         elif self.kind == "done":
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(Colors.GREEN))
+            p.setBrush(QColor(Colors.SUCCESS))
             p.drawEllipse(r)
-            p.drawPixmap(int(s * 0.25), int(s * 0.25), pixmap("check-bold", Colors.BG, int(s * 0.5)))
+            p.drawPixmap(int(s * 0.25), int(s * 0.25), pixmap("check-bold", Colors.BACKGROUND, int(s * 0.5)))
         elif self.kind == "failed":
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor("#3A1A22"))
+            p.setBrush(QColor(255, 24, 56, 46))
             p.drawEllipse(r)
-            p.drawPixmap(int(s * 0.2), int(s * 0.2), pixmap("alert", Colors.RED, int(s * 0.6)))
+            p.drawPixmap(int(s * 0.2), int(s * 0.2), pixmap("alert", Colors.DANGER, int(s * 0.6)))
         else:  # queued / cancelled
             name = "stop" if self.kind == "cancelled" else "clock"
             m = int(s * 0.12)
@@ -359,7 +494,7 @@ class FileRow(QFrame):
         thumb.setFixedSize(44, 44)
         tl = QVBoxLayout(thumb)
         tl.setContentsMargins(0, 0, 0, 0)
-        tl.addWidget(icon_label("music", Colors.PURPLE_LIGHT, 20), 0, Qt.AlignCenter)
+        tl.addWidget(icon_label("music", Colors.PRIMARY_LIGHT, 20), 0, Qt.AlignCenter)
         lay.addWidget(thumb)
 
         text = QVBoxLayout()
@@ -395,7 +530,7 @@ class FileRow(QFrame):
 
         self.btn_remove = QPushButton()
         self.btn_remove.setObjectName("rowRemove")
-        self.btn_remove.setIcon(icon("close", Colors.TEXT_MUTED, 18, disabled_color="#2A3245"))
+        self.btn_remove.setIcon(icon("close", Colors.TEXT_MUTED, 18, disabled_color=Colors.TEXT_DISABLED))
         self.btn_remove.setIconSize(QSize(18, 18))
         self.btn_remove.setFixedSize(34, 34)
         self.btn_remove.setToolTip(tr("Remove from the list"))
@@ -526,7 +661,7 @@ class FileQueue(QFrame):
         el = QVBoxLayout(empty)
         el.setContentsMargins(0, Spacing.LG, 0, Spacing.LG)
         el.setSpacing(Spacing.XS)
-        el.addWidget(icon_label("music", Colors.TEXT_MUTED, 26), 0, Qt.AlignHCenter)
+        el.addWidget(Watermark(56, 0.28), 0, Qt.AlignHCenter)
         el.addSpacing(Spacing.SM)
         el.addWidget(centered_label(tr("No files added yet"), "emptyTitle"))
         el.addWidget(centered_label(tr("Add an audio file to start separating stems."), "hint"))
@@ -568,7 +703,7 @@ class OutputSettings(QFrame):
 
         head = QHBoxLayout()
         head.setSpacing(Spacing.SM + 2)
-        head.addWidget(icon_label("settings", Colors.PURPLE_LIGHT, 20))
+        head.addWidget(icon_label("settings", Colors.PRIMARY_LIGHT, 20))
         head.addWidget(label(tr("Output Settings"), "sectionTitle"))
         head.addStretch(1)
         lay.addLayout(head)
@@ -654,6 +789,79 @@ class OutputSettings(QFrame):
             self.divider.setVisible(two)
 
 
+# -- processing animation -----------------------------------------------------------------
+class SplitAnimation(QWidget):
+    """While a song is split: one waveform fans out into four, and the four light up with the progress.
+    Idle: the logo."""
+
+    LANES = 4
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(112, 52)
+        self._running = False
+        self._phase = 0.0
+        self._fraction = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(40)
+        self._timer.timeout.connect(self._advance)
+
+    def set_running(self, on: bool) -> None:
+        self._running = on
+        if on and self.isVisible():
+            self._timer.start()
+        else:
+            self._timer.stop()
+        self.update()
+
+    def set_fraction(self, fraction: float) -> None:
+        self._fraction = fraction
+
+    def showEvent(self, e):
+        if self._running:
+            self._timer.start()
+
+    def hideEvent(self, e):
+        self._timer.stop()
+
+    def _advance(self) -> None:
+        self._phase += 0.16
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        h = self.height()
+        if not self._running:
+            p.drawPixmap((self.width() - 48) // 2, (h - 48) // 2, logo(48))
+            return
+        # the source waveform on the left
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 24, 56, 230))
+        for i in range(6):
+            amp = 0.35 + 0.65 * abs(math.sin(self._phase * 1.3 + i * 0.9))
+            p.drawRoundedRect(QRectF(2 + i * 6, h / 2 - amp * 17, 3.5, amp * 34), 1.7, 1.7)
+        # the stems on the right, each lit a little more as the split advances
+        lane_x = 74
+        for lane in range(self.LANES):
+            y = h * (lane + 0.5) / self.LANES
+            lit = max(0.0, min(1.0, self._fraction * self.LANES - lane + 0.35))
+            alpha = 0.30 + 0.70 * lit
+            curve = QPainterPath(QPointF(40, h / 2))
+            curve.cubicTo(QPointF(58, h / 2), QPointF(56, y), QPointF(lane_x - 4, y))
+            p.setPen(QPen(QColor(255, 24, 56, round(255 * 0.45 * alpha)), 1.4))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(curve)
+            dot = curve.pointAtPercent((self._phase * 0.35 + lane * 0.25) % 1.0)  # a pulse travelling the curve
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 74, 95, round(255 * alpha)))
+            p.drawEllipse(dot, 1.8, 1.8)
+            p.setBrush(QColor(255, 24, 56, round(255 * alpha)))
+            for i in range(5):
+                amp = 0.3 + 0.7 * abs(math.sin(self._phase * (1.0 + 0.2 * lane) + i * 1.1 + lane))
+                p.drawRoundedRect(QRectF(lane_x + i * 7, y - amp * 4.5, 3, amp * 9), 1.5, 1.5)
+
+
 # -- processing panel -------------------------------------------------------------------
 class ProcessingPanel(QFrame):
     """The bottom card: what is running (name, stage, progress, time left) and the main actions."""
@@ -667,14 +875,8 @@ class ProcessingPanel(QFrame):
         lay.setContentsMargins(Spacing.LG + 4, Spacing.LG, Spacing.LG + 4, Spacing.LG)
         lay.setSpacing(Spacing.LG)
 
-        tile = card("iconTile")
-        tile.setFixedSize(52, 52)
-        tl = QVBoxLayout(tile)
-        tl.setContentsMargins(0, 0, 0, 0)
-        self.tile_icon = QLabel()
-        self.tile_icon.setFixedSize(24, 24)
-        tl.addWidget(self.tile_icon, 0, Qt.AlignCenter)
-        lay.addWidget(tile)
+        self.anim = SplitAnimation()
+        lay.addWidget(self.anim)
 
         mid = QVBoxLayout()
         mid.setSpacing(4)
@@ -715,7 +917,7 @@ class ProcessingPanel(QFrame):
         self.btn_log.setToolTip(tr("Show or hide the log"))
         self.btn_open = button(tr("Open output folder"), "folder-open", None, Sizes.BUTTON_SMALL + 4, Colors.TEXT_2)
         self.btn_open.setToolTip(tr("Open the output folder"))
-        self.btn_cancel = button(tr("Cancel"), "stop", "danger", Sizes.BUTTON, Colors.RED)
+        self.btn_cancel = button(tr("Cancel"), "stop", "danger", Sizes.BUTTON, Colors.DANGER)
         self.btn_cancel.setMinimumWidth(120)
         self.btn_start = button(tr("Split Stems"), "waveform", "primary", Sizes.BUTTON_PRIMARY, "#FFFFFF")
         self.btn_start.setMinimumWidth(170)
@@ -744,7 +946,7 @@ class ProcessingPanel(QFrame):
         self.btn_cancel.setVisible(running)
         self.btn_start.setVisible(not running)
         self.nums.setVisible(running)
-        self.tile_icon.setPixmap(pixmap("music" if running else "waveform", Colors.PURPLE_LIGHT, 24))
+        self.anim.set_running(running)
         if running:
             self.btn_cancel.setEnabled(True)
             self.btn_cancel.setText(f" {tr('Cancel')}")
@@ -762,6 +964,7 @@ class ProcessingPanel(QFrame):
         self.detail.setText(stage)
         self.progress.setVisible(True)
         self.set_progress(int(fraction * 1000))
+        self.anim.set_fraction(fraction)
         self.percent.setText(f"{fraction:.0%}")
         self.eta.setText(eta)
         margins = self.nums.layout().contentsMargins()  # "Estimating time…" is longer in some languages
@@ -827,11 +1030,11 @@ class StatusBar(QFrame):
         self._items = []
         parts = [(tr_n("{n} file", "{n} files", total), None)]
         if done:
-            parts.append((tr("{n} completed", n=done), Colors.GREEN))
+            parts.append((tr("{n} completed", n=done), Colors.SUCCESS))
         if running:
-            parts.append((tr("{n} processing", n=running), Colors.PURPLE_LIGHT))
+            parts.append((tr("{n} processing", n=running), Colors.PRIMARY_LIGHT))
         if failed:
-            parts.append((tr("{n} failed", n=failed), Colors.RED))
+            parts.append((tr("{n} failed", n=failed), Colors.DANGER))
         for i, (text, dot) in enumerate(parts):
             if i:
                 self._add(label("|", "statusText"))

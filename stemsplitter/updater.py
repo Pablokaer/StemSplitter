@@ -266,7 +266,7 @@ def _writable(folder: Path) -> bool:
 def self_update_problem(inst: Installation | None, release: Release) -> str | None:
     """Why this copy can't install `release` by itself (the user then gets the download page), or None."""
     if inst is None:
-        return tr("StemSplitter is running from source code here: update it with git pull.")
+        return tr("OctoSplitter is running from source code here: update it with git pull.")
     if not inst.platform:
         return tr("This build was not made by the release workflow, so it can't update itself.")
     if index_name(inst.platform) not in release.assets or not archive_parts(release.assets,
@@ -274,7 +274,7 @@ def self_update_problem(inst: Installation | None, release: Release) -> str | No
         return tr("Version {version} has no update files for this build ({platform}).",
                   version=release.version, platform=inst.platform)
     if not _writable(inst.root) or not _writable(inst.root.parent):
-        return tr("StemSplitter can't write to the folder it is installed in ({folder}).", folder=inst.root.parent)
+        return tr("OctoSplitter can't write to the folder it is installed in ({folder}).", folder=inst.root.parent)
     return None
 
 
@@ -878,12 +878,12 @@ def install(work: Path, status: Callable[[str], None] = lambda text: None,
     plan = _read_json(work / PLAN)
     root, staging, backup = Path(plan["root"]), work / NEW, work / OLD
     result = {"ok": False, "version": plan["version"], "from": plan["from"]}
-    status(tr("Waiting for StemSplitter to close…"))
+    status(tr("Waiting for OctoSplitter to close…"))
     deadline = time.monotonic() + 120
     while _pid_alive(plan.get("pid")) and time.monotonic() < deadline:
         time.sleep(0.2)
     if _pid_alive(plan.get("pid")):
-        result["message"] = tr("StemSplitter didn't close, so nothing was changed.")
+        result["message"] = tr("OctoSplitter didn't close, so nothing was changed.")
         _write_json(work / RESULT, result)
         return result
     _write_json(work / STATE, {"state": "applying", "helper": os.getpid()})

@@ -99,8 +99,6 @@ MESSAGES = {
         "正在下载{model}（仅首次运行）：{mb} MB",
     "Downloading {size}…":
         "正在下载 {size}…",
-    "Drag & drop audio files here":
-        "将音频文件拖放到这里",
     "Drum kit and percussion":
         "架子鼓与打击乐",
     "Drums":
@@ -187,8 +185,8 @@ MESSAGES = {
         "每个音轨一个文件，每首歌一个子文件夹。",
     "One queue, one model load":
         "一个队列，只加载一次模型",
-    "Only the files that changed are downloaded. StemSplitter then closes, installs the update, checks it and opens again; if the check fails, the current version is kept.":
-        "只下载有变化的文件。随后 StemSplitter 会关闭、安装更新、进行检查并重新打开；如果检查失败，将保留当前版本。",
+    "Only the files that changed are downloaded. OctoSplitter then closes, installs the update, checks it and opens again; if the check fails, the current version is kept.":
+        "只下载有变化的文件。随后 OctoSplitter 会关闭、安装更新、进行检查并重新打开；如果检查失败，将保留当前版本。",
     "Open download page":
         "打开下载页面",
     "Open output folder":
@@ -231,8 +229,8 @@ MESSAGES = {
         "从列表中移除",
     "Remove selected":
         "移除所选",
-    "Restart StemSplitter now to use the new language?":
-        "现在重新启动 StemSplitter 以使用新语言吗？",
+    "Restart OctoSplitter now to use the new language?":
+        "现在重新启动 OctoSplitter 以使用新语言吗？",
     "Restoring the previous version…":
         "正在恢复之前的版本…",
     "Save stems to":
@@ -269,32 +267,30 @@ MESSAGES = {
         "从“其他”中分离",
     "Splits all the stems in one pass.":
         "一次分离所有音轨。",
-    "Starting StemSplitter…":
-        "正在启动 StemSplitter…",
+    "Starting OctoSplitter…":
+        "正在启动 OctoSplitter…",
     "Starting engine (loading PyTorch)...":
         "正在启动引擎（加载 PyTorch）...",
     "Starting…":
         "正在启动…",
-    "StemSplitter can't write to the folder it is installed in ({folder}).":
-        "StemSplitter 无法写入其安装文件夹（{folder}）。",
-    "StemSplitter could not be started again ({reason}). Start it yourself.":
-        "无法重新启动 StemSplitter（{reason}）。请手动启动。",
-    "StemSplitter didn't close, so nothing was changed.":
-        "StemSplitter 未关闭，因此未做任何更改。",
-    "StemSplitter is running from source code here: update it with git pull.":
-        "StemSplitter 正从源代码运行：请用 git pull 更新。",
-    "StemSplitter never uses this much of the free memory, so the computer stays responsive. When memory runs short it slows down or waits, and never loses work. Automatic keeps 2 GB free, or a quarter of the RAM on machines with less than 8 GB.":
-        "StemSplitter 从不占用这部分可用内存，让电脑保持流畅。内存不足时它会放慢或等待，绝不会丢失进度。“自动”保留 2 GB，内存小于 8 GB 的电脑保留四分之一。",
-    "StemSplitter restarts to show the new language.":
-        "StemSplitter 将重新启动以显示新语言。",
-    "StemSplitter was updated to version {version}.":
-        "StemSplitter 已更新到版本 {version}。",
-    "StemSplitter {version} is available":
-        "StemSplitter {version} 现已推出",
+    "OctoSplitter can't write to the folder it is installed in ({folder}).":
+        "OctoSplitter 无法写入其安装文件夹（{folder}）。",
+    "OctoSplitter could not be started again ({reason}). Start it yourself.":
+        "无法重新启动 OctoSplitter（{reason}）。请手动启动。",
+    "OctoSplitter didn't close, so nothing was changed.":
+        "OctoSplitter 未关闭，因此未做任何更改。",
+    "OctoSplitter is running from source code here: update it with git pull.":
+        "OctoSplitter 正从源代码运行：请用 git pull 更新。",
+    "OctoSplitter never uses this much of the free memory, so the computer stays responsive. When memory runs short it slows down or waits, and never loses work. Automatic keeps 2 GB free, or a quarter of the RAM on machines with less than 8 GB.":
+        "OctoSplitter 从不占用这部分可用内存，让电脑保持流畅。内存不足时它会放慢或等待，绝不会丢失进度。“自动”保留 2 GB，内存小于 8 GB 的电脑保留四分之一。",
+    "OctoSplitter restarts to show the new language.":
+        "OctoSplitter 将重新启动以显示新语言。",
+    "OctoSplitter was updated to version {version}.":
+        "OctoSplitter 已更新到版本 {version}。",
+    "OctoSplitter {version} is available":
+        "OctoSplitter {version} 现已推出",
     "Stems to extract":
         "要提取的音轨",
-    "Supports MP3, WAV, FLAC, M4A and more. Folders are scanned too.":
-        "支持 MP3、WAV、FLAC、M4A 等格式，也会扫描文件夹。",
     "System default":
         "系统默认",
     "The app's files could not be replaced ({reason}), so the previous version was kept.":
@@ -309,8 +305,8 @@ MESSAGES = {
         "下载服务器不支持部分下载。",
     "The installed files already match version {version}.":
         "已安装的文件已与版本 {version} 一致。",
-    "The new language is used the next time StemSplitter starts.":
-        "新语言将在下次启动 StemSplitter 时生效。",
+    "The new language is used the next time OctoSplitter starts.":
+        "新语言将在下次启动 OctoSplitter 时生效。",
     "The new version didn't start ({reason}).":
         "新版本未能启动（{reason}）。",
     "The new version failed its self-test, so the previous version was kept.":
@@ -357,10 +353,10 @@ MESSAGES = {
         "立即更新",
     "Updates":
         "更新",
-    "Updating StemSplitter":
-        "正在更新 StemSplitter",
-    "Updating StemSplitter to version {version}":
-        "正在将 StemSplitter 更新到版本 {version}",
+    "Updating OctoSplitter":
+        "正在更新 OctoSplitter",
+    "Updating OctoSplitter to version {version}":
+        "正在将 OctoSplitter 更新到版本 {version}",
     "Uses all the memory it wants and never waits for free memory: the fastest option, but the computer can slow down or swap, and the system may end the app if it runs out of memory (the split then resumes from its checkpoint). Use it only when nothing else important is running.":
         "随意使用内存，从不等待可用内存：速度最快，但电脑可能变慢或使用交换空间，内存耗尽时系统可能关闭应用（分离会从检查点继续）。仅在没有其他重要程序运行时使用。",
     "Version {version}":
@@ -373,16 +369,16 @@ MESSAGES = {
         "人声",
     "WAV · 24-bit (lossless)":
         "WAV · 24 位（无损）",
-    "Waiting for StemSplitter to close…":
-        "正在等待 StemSplitter 关闭…",
+    "Waiting for OctoSplitter to close…":
+        "正在等待 OctoSplitter 关闭…",
     "Waiting for free memory ({mb} MB more needed)...":
         "正在等待可用内存（还需 {mb} MB）...",
     "What was already downloaded is kept: the next try continues from there.":
         "已下载的内容会保留，下次将从此处继续。",
     "What's new":
         "新功能",
-    "When a new version is published, StemSplitter shows what changed and asks before updating. It then downloads only the files that changed and restarts.":
-        "发布新版本时，StemSplitter 会显示更新内容并在更新前询问你，然后只下载有变化的文件并重新启动。",
+    "When a new version is published, OctoSplitter shows what changed and asks before updating. It then downloads only the files that changed and restarts.":
+        "发布新版本时，OctoSplitter 会显示更新内容并在更新前询问你，然后只下载有变化的文件并重新启动。",
     "Working with many songs":
         "处理大量歌曲",
     "Writing files...":
@@ -437,4 +433,52 @@ MESSAGES = {
         "{s}秒",
     "{time} remaining":
         "剩余 {time}",
+    "Can't play this file here":
+        "无法在此播放该文件",
+    "Copy file path":
+        "复制文件路径",
+    "Drop your audio file here":
+        "将音频文件拖放到此处",
+    "Extracted Stems":
+        "已提取的分轨",
+    "Instrumental":
+        "伴奏",
+    "Loading stems…":
+        "正在加载分轨…",
+    "More":
+        "更多",
+    "Mute":
+        "静音",
+    "No Drums":
+        "无鼓",
+    "No audio output device was found.":
+        "未找到音频输出设备。",
+    "Open folder":
+        "打开文件夹",
+    "Other":
+        "其他",
+    "Pause":
+        "暂停",
+    "Piano":
+        "钢琴",
+    "Play":
+        "播放",
+    "Play stems":
+        "播放分轨",
+    "Show in folder":
+        "在文件夹中显示",
+    "Solo":
+        "独奏",
+    "Split a song, then play, solo or mute each stem.":
+        "先分离一首歌，然后可以播放、独奏或静音每条分轨。",
+    "These files can't be played here.":
+        "无法在此播放这些文件。",
+    "Volume":
+        "音量",
+    "Your stems will show up here":
+        "你的分轨将显示在这里",
+    "or click to browse":
+        "或点击浏览",
+    "{formats} · folders are scanned too":
+        "{formats} · 文件夹也会被扫描",
 }

@@ -24,15 +24,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import APP_NAME, __version__
+from . import APP_NAME, DISPLAY_NAME, __version__
 from . import i18n, updater
 from .i18n import N_, tr, tr_n
 from .memory import memlog
 from .platform_utils import default_output_dir, open_folder
 from .ui.pages import AboutPage, BatchPage, SettingsPage
+from .ui.stems import ResultsPanel
 from .ui.theme import Sizes, Spacing, Type, dark_palette, pick_font_family, stylesheet
 from .ui.update_dialog import Task, UpdateDialog
 from .ui.widgets import (
+    Backdrop,
     DropZone,
     FileList,
     FileQueue,
@@ -281,7 +283,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"{APP_NAME}")
+        self.setWindowTitle(DISPLAY_NAME)
         self._fit_to_screen()
         self.settings = QSettings(APP_NAME, APP_NAME)
         self.engine = EngineProcess(self)
@@ -295,6 +297,7 @@ class MainWindow(QMainWindow):
         self.engine.stopped.connect(self._on_worker_stopped)
         self._current_row: int | None = None  # the song the processing panel follows
         self._timing: dict[int, tuple[float, float]] = {}  # row -> (time, fraction) the time left is measured from
+        self._stems: dict[str, dict[str, str]] = {}  # song path -> {stem: file} of every song split this session
         self._panel_ready = True  # the panel shows the queue summary (not a finished batch's result)
         self._update_task: Task | None = None
         self._manual_check = False
@@ -306,14 +309,16 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(3000, self._check_updates)
 
     def _fit_to_screen(self):
-        """Open at the minimum size; `center_on_screen` places the window once the UI is built."""
+        """Open at the usual size; `center_on_screen` places the window once the UI is built."""
         min_w, min_h = Sizes.WINDOW_MIN
+        open_w, open_h = Sizes.WINDOW_OPEN
         screen = QGuiApplication.primaryScreen()
         if screen is not None:  # small or scaled-up screens: never open larger than the screen
             avail = screen.availableGeometry()
             min_w, min_h = min(min_w, avail.width()), min(min_h, avail.height() - 40)
+            open_w, open_h = min(open_w, avail.width()), min(open_h, avail.height() - 40)
         self.setMinimumSize(min_w, min_h)
-        self.resize(min_w, min_h)
+        self.resize(max(min_w, open_w), max(min_h, open_h))
 
     def center_on_screen(self):
         """Center the whole window, title bar included, on the primary screen's work area."""
@@ -324,6 +329,11 @@ class MainWindow(QMainWindow):
         frame = self.frameGeometry()
         frame.moveCenter(screen.availableGeometry().center())
         self.move(frame.topLeft())
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if hasattr(self, "sidebar"):
+            self.sidebar.set_compact(self.width() < Sizes.COMPACT_BELOW)
 
     # -- UI -----------------------------------------------------------------------------
     def _build_ui(self):
@@ -336,7 +346,9 @@ class MainWindow(QMainWindow):
 
         self.sidebar = Sidebar(__version__)
         outer.addWidget(self.sidebar)
-        right = QVBoxLayout()
+        backdrop = Backdrop()
+        backdrop.setObjectName("backdrop")
+        right = QVBoxLayout(backdrop)
         right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(0)
         self.pages = QStackedWidget()
@@ -352,12 +364,12 @@ class MainWindow(QMainWindow):
         self.settings_page.btn_check_updates.clicked.connect(lambda: self._check_updates(manual=True))
         self.language = self.settings_page.language
         self.pages.addWidget(self.settings_page)
-        self.pages.addWidget(AboutPage(APP_NAME, __version__))
+        self.pages.addWidget(AboutPage(DISPLAY_NAME, __version__))
         self.sidebar.page_changed.connect(self.pages.setCurrentIndex)
         right.addWidget(self.pages, 1)
         self.status_bar = StatusBar()
         right.addWidget(self.status_bar)
-        outer.addLayout(right, 1)
+        outer.addWidget(backdrop, 1)
 
         model = self.list.model()
         for sig in (model.rowsInserted, model.rowsRemoved, model.modelReset):
@@ -380,6 +392,7 @@ class MainWindow(QMainWindow):
         self.drop.files_dropped.connect(self.add_files)
         self.btn_add = self.drop.btn_add
         self.btn_add.clicked.connect(self._pick_files)
+        self.drop.browse_requested.connect(self._pick_files)
         self.btn_add_folder = self.drop.btn_folder
         self.btn_add_folder.clicked.connect(self._pick_folder)
         lay.addWidget(self.drop)
@@ -393,6 +406,10 @@ class MainWindow(QMainWindow):
         self.btn_clear = self.queue.btn_clear
         self.btn_clear.clicked.connect(self._clear)
         lay.addWidget(self.queue)
+
+        self.results = ResultsPanel()
+        self.results.song_requested.connect(self._show_results)
+        lay.addWidget(self.results)
 
         self.output = OutputSettings(QUALITIES, FORMATS, STEMS)
         self.out_edit = self.output.out_edit
@@ -530,7 +547,7 @@ class MainWindow(QMainWindow):
         self.sidebar.select(self.PAGE_SPLIT)
         paths = scan_paths([folder])
         if not paths:
-            QMessageBox.information(self, APP_NAME, tr("No supported audio files were found in that folder."))
+            QMessageBox.information(self, DISPLAY_NAME, tr("No supported audio files were found in that folder."))
             return
         self.add_files(paths)
 
@@ -561,6 +578,8 @@ class MainWindow(QMainWindow):
     def _on_queue_changed(self, *args):
         self._panel_ready = True
         self._refresh_summary()
+        if hasattr(self, "results") and not self._busy():
+            self._refresh_results()
 
     def _refresh_summary(self):
         states = [self.list.item(i).data(self.ROLE_STATE) for i in range(self.list.count())]
@@ -595,16 +614,16 @@ class MainWindow(QMainWindow):
             if self.list.item(i).data(self.ROLE_STATE) in ("queued", "failed")
         ]
         if not jobs:
-            QMessageBox.information(self, APP_NAME, tr("Add one or more songs first (drag & drop or “Add Files”)."))
+            QMessageBox.information(self, DISPLAY_NAME, tr("Add one or more songs first (drag & drop or “Add Files”)."))
             return
         if not self._selected_stems():
-            QMessageBox.information(self, APP_NAME, tr("Tick at least one stem to extract in Output Settings."))
+            QMessageBox.information(self, DISPLAY_NAME, tr("Tick at least one stem to extract in Output Settings."))
             return
         out = Path(self.out_edit.text()).expanduser()
         try:
             out.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            QMessageBox.warning(self, APP_NAME, tr("Can't use that output folder:") + f"\n{exc}")
+            QMessageBox.warning(self, DISPLAY_NAME, tr("Can't use that output folder:") + f"\n{exc}")
             return
         self._save_settings()
 
@@ -706,6 +725,9 @@ class MainWindow(QMainWindow):
     @Slot(int, dict, float)
     def _on_done(self, row: int, stems: dict, seconds: float):
         self._set_item(row, "done", "done", tr("done in {time}", time=format_duration(seconds)), 1.0)
+        item = self.list.item(row)
+        if item is not None:
+            self._stems[item.data(self.ROLE_PATH)] = stems
         self._append_log("Saved:\n  " + "\n  ".join(stems.values()))
 
     @Slot(int, str)
@@ -735,9 +757,33 @@ class MainWindow(QMainWindow):
         else:
             self.panel.set_message(tr_n("All done — {n} song split", "All done — {n} songs split", done),
                                    tr("Saved to {folder}", folder=self.out_edit.text()), 1000)
+        self._refresh_results(show_last=done > 0 and not cancelled)
         if self._pending_release is not None:
             release, self._pending_release = self._pending_release, None
             self._show_update(release)
+
+    # -- results ------------------------------------------------------------------------
+    def _split_songs(self) -> list[tuple[str, str]]:
+        """[(path, file name)] of the songs in the queue that have stems to listen to, in queue order."""
+        paths = [self.list.item(i).data(self.ROLE_PATH) for i in range(self.list.count())]
+        return [(p, Path(p).name) for p in paths if p in self._stems]
+
+    def _refresh_results(self, show_last: bool = False) -> None:
+        songs = self._split_songs()
+        shown = self.results.source
+        if show_last and songs:
+            shown = songs[-1][0]
+        elif shown not in {p for p, _ in songs}:
+            shown = songs[-1][0] if songs else ""
+        self.results.set_songs(songs, shown or None)
+        if shown and shown != self.results.source:
+            self._show_results(shown)
+            if show_last:  # bring the stems into view once a batch has finished
+                QTimer.singleShot(0, lambda: self.scroll.ensureWidgetVisible(self.results, 0, Spacing.XL))
+
+    def _show_results(self, path: str) -> None:
+        if path in self._stems:
+            self.results.load(path, self._stems[path])
 
     # -- updates ------------------------------------------------------------------------
     def _check_updates(self, manual: bool = False):
@@ -793,9 +839,9 @@ class MainWindow(QMainWindow):
         """The texts are set when the window is built, so a new language needs a restart (offered now)."""
         self.settings.setValue("language", self.language.currentData())
         if self._busy():
-            QMessageBox.information(self, APP_NAME, tr("The new language is used the next time StemSplitter starts."))
+            QMessageBox.information(self, DISPLAY_NAME, tr("The new language is used the next time OctoSplitter starts."))
             return
-        answer = QMessageBox.question(self, APP_NAME, tr("Restart StemSplitter now to use the new language?"))
+        answer = QMessageBox.question(self, DISPLAY_NAME, tr("Restart OctoSplitter now to use the new language?"))
         if answer == QMessageBox.Yes:
             self.restart()
 
@@ -812,12 +858,12 @@ class MainWindow(QMainWindow):
         version, previous = result.get("version", "?"), result.get("from", "?")
         if result.get("ok"):
             self._append_log(f"Updated from version {previous} to {version}")
-            QMessageBox.information(self, APP_NAME, tr("StemSplitter was updated to version {version}.",
+            QMessageBox.information(self, DISPLAY_NAME, tr("OctoSplitter was updated to version {version}.",
                                                        version=version))
         else:
             message = result.get("message", "")
             self._append_log(f"The update to version {version} failed: {message}")
-            QMessageBox.warning(self, APP_NAME, tr("The update to version {version} was not installed.",
+            QMessageBox.warning(self, DISPLAY_NAME, tr("The update to version {version} was not installed.",
                                                    version=version) + f"\n\n{message}")
 
     @Slot(str)
@@ -826,7 +872,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         if self._busy():
-            if QMessageBox.question(self, APP_NAME, tr("A song is still being processed. Quit anyway?")) \
+            if QMessageBox.question(self, DISPLAY_NAME, tr("A song is still being processed. Quit anyway?")) \
                     != QMessageBox.Yes:
                 e.ignore()
                 return
@@ -836,6 +882,7 @@ class MainWindow(QMainWindow):
             self.engine.shutdown(timeout=30)
         else:
             self.engine.shutdown()
+        self.results.clear()
         self._save_settings()
         e.accept()
 
@@ -843,7 +890,7 @@ class MainWindow(QMainWindow):
 # --------------------------------------------------------------------------------------
 def make_app() -> QApplication:
     """The QApplication with the app's style (also used by the update helper's window)."""
-    QApplication.setApplicationName(APP_NAME)
+    QApplication.setApplicationName(DISPLAY_NAME)
     QApplication.setOrganizationName(APP_NAME)
     app = QApplication(sys.argv)
     app.setStyle("Fusion")

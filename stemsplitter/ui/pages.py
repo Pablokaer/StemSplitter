@@ -36,7 +36,7 @@ def _card(title: str, icon_name: str) -> tuple[QFrame, QVBoxLayout]:
     lay.setSpacing(Spacing.MD)
     head = QHBoxLayout()
     head.setSpacing(Spacing.SM + 2)
-    head.addWidget(icon_label(icon_name, Colors.PURPLE_LIGHT, 20))
+    head.addWidget(icon_label(icon_name, Colors.PRIMARY_LIGHT, 20))
     head.addWidget(label(tr(title), "sectionTitle"))
     head.addStretch(1)
     lay.addLayout(head)
@@ -49,7 +49,7 @@ def _fact(icon_name: str, title: str, text: str) -> QWidget:
     lay.setContentsMargins(0, Spacing.XS, 0, Spacing.XS)
     lay.setSpacing(Spacing.MD + 2)
     ic = QLabel()
-    ic.setPixmap(pixmap(icon_name, Colors.PURPLE_LIGHT, 20))
+    ic.setPixmap(pixmap(icon_name, Colors.PRIMARY_LIGHT, 20))
     ic.setFixedSize(20, 20)
     lay.addWidget(ic, 0, Qt.AlignTop)
     col = QVBoxLayout()
@@ -106,7 +106,7 @@ class SettingsPage(QScrollArea):
         self.reserve.setMaximumWidth(420)
         lay.addWidget(self.reserve)
         lay.addWidget(label(tr(
-            "StemSplitter never uses this much of the free memory, so the computer stays responsive. When memory "
+            "OctoSplitter never uses this much of the free memory, so the computer stays responsive. When memory "
             "runs short it slows down or waits, and never loses work. Automatic keeps 2 GB free, or a quarter of "
             "the RAM on machines with less than 8 GB."), "hint", wrap=True))
         lay.addSpacing(Spacing.SM)
@@ -126,13 +126,13 @@ class SettingsPage(QScrollArea):
             self.language.addItem(name, code)
         self.language.setMaximumWidth(420)
         gl.addWidget(self.language)
-        gl.addWidget(label(tr("StemSplitter restarts to show the new language."), "hint", wrap=True))
+        gl.addWidget(label(tr("OctoSplitter restarts to show the new language."), "hint", wrap=True))
         updates, ul = _card(N_("Updates"), "refresh")
         ul.addWidget(label(tr("You have version {version}.", version=version), "body"))
         self.chk_updates = QCheckBox(tr("Check for updates when the app starts"))
         ul.addWidget(self.chk_updates)
         ul.addWidget(label(tr(
-            "When a new version is published, StemSplitter shows what changed and asks before updating. It then "
+            "When a new version is published, OctoSplitter shows what changed and asks before updating. It then "
             "downloads only the files that changed and restarts."), "hint", wrap=True))
         ul.addSpacing(Spacing.XS)
         row = QHBoxLayout()
